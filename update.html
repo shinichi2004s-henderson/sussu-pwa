@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>すっす 更新確認</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 520px; margin: 48px auto; padding: 0 20px; color: #162033; line-height: 1.7; }
+    button { background: #22304a; color: white; border: 0; border-radius: 9px; padding: 12px 18px; font: inherit; cursor: pointer; }
+    button:disabled { opacity: .5; cursor: default; }
+    #status { border-radius: 9px; background: #eef2f7; padding: 12px; }
+  </style>
+</head>
+<body>
+  <h1>すっす 更新確認</h1>
+  <p>この画面が表示されていれば、更新用のファイルがあるフォルダから起動しています。下のボタンは、保存済みTodoを残したまま、古い画面用のキャッシュを外します。</p>
+  <button id="updateButton" type="button" disabled>最新版を開く</button>
+  <p id="status" role="status">起動中のファイルを確認しています…</p>
+  <script>
+    const button = document.getElementById("updateButton");
+    const status = document.getElementById("status");
+    (async () => {
+      try {
+        const response = await fetch("./sw.js?check=" + Date.now(), { cache: "no-store" });
+        const source = await response.text();
+        if (!response.ok || !source.includes('sussu-cache-v6')) {
+          status.textContent = "古いフォルダから起動しています。サーバーを止め、今回のZIPを展開した sussu-pwa フォルダで起動し直してください。";
+          return;
+        }
+        status.textContent = "最新版のファイルを確認できました。「最新版を開く」を押してください。";
+        button.disabled = false;
+      } catch (error) {
+        status.textContent = "ファイルを確認できません。サーバーが動いているか確かめてください。";
+      }
+    })();
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      status.textContent = "表示を更新しています…";
+      try {
+        if ("serviceWorker" in navigator) {
+          const scope = new URL("./", location.href).href;
+          for (const registration of await navigator.serviceWorker.getRegistrations()) {
+            if (registration.scope === scope) await registration.unregister();
+          }
+        }
+        if ("caches" in window) {
+          for (const name of await caches.keys()) {
+            if (/^sussu-cache-v\d+$/.test(name)) await caches.delete(name);
+          }
+        }
+        location.replace("./?updated=" + Date.now());
+      } catch (error) {
+        button.disabled = false;
+        status.textContent = "更新できませんでした。ブラウザを閉じて開き直してください。";
+      }
+    });
+  </script>
+</body>
+</html>

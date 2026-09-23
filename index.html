@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#f5f7fb" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="すっす" />
+  <title>すっす</title>
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="./icon-192.png" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="app-header">
+      <div>
+        <div class="eyebrow">TODO ORGANIZER</div>
+        <h1>すっす <span class="muted">(仮) v6</span></h1>
+      </div>
+      <div class="header-actions">
+        <button id="completedBtn" class="icon-btn" type="button" aria-label="完了一覧">✓</button>
+        <button id="settingsBtn" class="icon-btn" type="button" aria-label="設定">⚙</button>
+      </div>
+    </header>
+
+    <main>
+      <section id="matrixPage" class="page active" aria-labelledby="matrixTab">
+        <div class="section-head">
+          <div>
+            <h2>優先度マトリックス</h2>
+            <p>緊急度：左が高い / 右が低い</p>
+          </div>
+          <button id="addMatrixTodoBtn" class="primary-btn" type="button">＋ Todo</button>
+        </div>
+
+        <div class="matrix-axis">
+          <div class="axis-label urgency-label">← 緊急度 高い　　低い →</div>
+          <div class="matrix-grid">
+            <div class="importance-side">
+              <span>重要度</span>
+              <span>高い</span>
+              <span>↓</span>
+              <span>低い</span>
+            </div>
+
+            <div class="matrix-cells">
+              <section class="matrix-cell" data-importance="high" data-urgency="high">
+                <div class="matrix-cell-head">
+                  <strong>重要・緊急</strong>
+                  <span class="priority-dot" data-priority="high-high"></span>
+                </div>
+                <div class="matrix-dropzone" data-importance="high" data-urgency="high"></div>
+              </section>
+
+              <section class="matrix-cell" data-importance="high" data-urgency="low">
+                <div class="matrix-cell-head">
+                  <strong>重要・非緊急</strong>
+                  <span class="priority-dot" data-priority="high-low"></span>
+                </div>
+                <div class="matrix-dropzone" data-importance="high" data-urgency="low"></div>
+              </section>
+
+              <section class="matrix-cell" data-importance="low" data-urgency="high">
+                <div class="matrix-cell-head">
+                  <strong>非重要・緊急</strong>
+                  <span class="priority-dot" data-priority="low-high"></span>
+                </div>
+                <div class="matrix-dropzone" data-importance="low" data-urgency="high"></div>
+              </section>
+
+              <section class="matrix-cell" data-importance="low" data-urgency="low">
+                <div class="matrix-cell-head">
+                  <strong>非重要・非緊急</strong>
+                  <span class="priority-dot" data-priority="low-low"></span>
+                </div>
+                <div class="matrix-dropzone" data-importance="low" data-urgency="low"></div>
+              </section>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="schedulePage" class="page" aria-labelledby="scheduleTab">
+        <div class="goal-strip">
+          <button id="yearGoalsBtn" class="goal-card" type="button">
+            <span class="goal-label">今年の目標</span>
+            <strong id="yearGoalSummary">未設定</strong>
+            <small>タップして見る</small>
+          </button>
+          <button id="monthGoalsBtn" class="goal-card" type="button">
+            <span class="goal-label">今月の目標</span>
+            <strong id="monthGoalSummary">未設定</strong>
+            <small>タップして見る</small>
+          </button>
+        </div>
+
+        <section class="week-panel">
+          <div class="panel-head">
+            <div>
+              <h2>今週やること</h2>
+              <p id="weekRangeLabel"></p>
+            </div>
+            <button id="addWeekTodoBtn" class="secondary-btn" type="button">＋ 追加</button>
+          </div>
+          <div id="weekTodoList" class="compact-list"></div>
+        </section>
+
+        <section class="day-panel">
+          <div class="day-title-row">
+            <button id="prevDayBtn" class="icon-btn" type="button" aria-label="前の日">‹</button>
+            <div>
+              <span class="today-kicker">今日 / 日のTodo</span>
+              <h2 id="selectedDateLabel"></h2>
+            </div>
+            <button id="nextDayBtn" class="icon-btn" type="button" aria-label="次の日">›</button>
+          </div>
+
+          <div class="unscheduled">
+            <div class="panel-head compact">
+              <h3>時間未定</h3>
+              <button id="addDayTodoBtn" class="text-btn" type="button">＋ Todo</button>
+            </div>
+            <div id="unscheduledList" class="compact-list"></div>
+          </div>
+
+          <div id="timeline" class="timeline" aria-label="6時から24時の時間割"></div>
+        </section>
+      </section>
+
+      <section id="calendarPage" class="page" aria-labelledby="calendarTab">
+        <div class="section-head calendar-heading">
+          <div>
+            <h2>カレンダー</h2>
+            <p>実行日と期限をひと月で確認</p>
+          </div>
+          <button id="addCalendarTodoBtn" class="primary-btn" type="button">＋ Todo</button>
+        </div>
+        <div class="calendar-panel">
+          <div class="calendar-toolbar">
+            <button id="prevMonthBtn" class="icon-btn" type="button" aria-label="前の月">‹</button>
+            <h3 id="calendarMonthLabel"></h3>
+            <button id="nextMonthBtn" class="icon-btn" type="button" aria-label="次の月">›</button>
+            <button id="calendarTodayBtn" class="secondary-btn" type="button">今日</button>
+          </div>
+          <div class="calendar-weekdays" aria-hidden="true">
+            <span>日</span><span>月</span><span>火</span><span>水</span><span>木</span><span>金</span><span>土</span>
+          </div>
+          <div id="calendarGrid" class="calendar-grid" role="grid" aria-label="月間カレンダー"></div>
+          <p class="calendar-key">予定：左端は優先度の色　<span class="calendar-key-due">■</span> 期限（完了したTodoは非表示）</p>
+        </div>
+        <section class="calendar-agenda" aria-labelledby="calendarSelectedLabel">
+          <div class="panel-head">
+            <h3 id="calendarSelectedLabel"></h3>
+            <button id="calendarAddForDateBtn" class="text-btn" type="button">＋ この日に追加</button>
+          </div>
+          <div id="calendarAgendaList"></div>
+        </section>
+        <details class="calendar-undated">
+          <summary>日付未設定のTodo <span id="calendarUndatedCount"></span></summary>
+          <div id="calendarUndatedList"></div>
+        </details>
+      </section>
+    </main>
+
+    <nav class="bottom-tabs" aria-label="メインナビゲーション">
+      <button id="matrixTab" class="tab active" type="button" data-page="matrixPage">
+        <span class="tab-icon">▦</span>
+        <span>マトリックス</span>
+      </button>
+      <button id="scheduleTab" class="tab" type="button" data-page="schedulePage">
+        <span class="tab-icon">◷</span>
+        <span>今日・予定</span>
+      </button>
+      <button id="calendarTab" class="tab" type="button" data-page="calendarPage">
+        <span class="tab-icon">📅</span>
+        <span>カレンダー</span>
+      </button>
+    </nav>
+  </div>
+
+  <div id="modalRoot"></div>
+  <div id="toast" class="toast" aria-live="polite"></div>
+
+  <script src="./app.js" defer></script>
+</body>
+</html>
