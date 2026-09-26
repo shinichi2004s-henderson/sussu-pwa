@@ -17,13 +17,14 @@
     <header class="app-header">
       <div>
         <div class="eyebrow">TODO ORGANIZER</div>
-        <h1>すっす <span class="muted">(仮) v6</span></h1>
+        <h1>すっす <span class="muted">(仮) v8</span></h1>
       </div>
       <div class="header-actions">
         <button id="completedBtn" class="icon-btn" type="button" aria-label="完了一覧">✓</button>
         <button id="settingsBtn" class="icon-btn" type="button" aria-label="設定">⚙</button>
       </div>
     </header>
+    <div id="syncBanner" role="status" aria-live="polite"></div>
 
     <main>
       <section id="matrixPage" class="page active" aria-labelledby="matrixTab">
@@ -80,6 +81,7 @@
             </div>
           </div>
         </div>
+        <div id="categoryLegend" class="category-legend" aria-label="カテゴリーの色分け"></div>
       </section>
 
       <section id="schedulePage" class="page" aria-labelledby="scheduleTab">
@@ -95,6 +97,17 @@
             <small>タップして見る</small>
           </button>
         </div>
+
+        <section class="week-panel">
+          <div class="panel-head">
+            <div>
+              <h2>来週やること</h2>
+              <p id="nextWeekRangeLabel"></p>
+            </div>
+            <button id="addNextWeekTodoBtn" class="secondary-btn" type="button">＋ 追加</button>
+          </div>
+          <div id="nextWeekTodoList" class="compact-list"></div>
+        </section>
 
         <section class="week-panel">
           <div class="panel-head">
@@ -183,6 +196,7 @@
   <div id="modalRoot"></div>
   <div id="toast" class="toast" aria-live="polite"></div>
 
+  <script src="./firebase-config.js" defer></script>
   <script src="./app.js" defer></script>
 </body>
 </html>

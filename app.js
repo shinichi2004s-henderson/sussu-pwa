@@ -2,7 +2,7 @@
   "use strict";
 
   const STORAGE_KEY = "sussu-data-v1";
-  const VERSION = 1;
+  const VERSION = 8;
   // The same 16 choices are used for priority and category colors.
   const COLOR_PALETTE = [
     ["赤", "#d95c5c"], ["濃い赤", "#b94359"], ["オレンジ", "#d58a37"], ["黄", "#d4a72c"],
@@ -42,6 +42,13 @@
   let undoTimer = null;
   let pendingUndo = null;
   let suppressClickUntil = 0;
+  let syncController = null;
+  let syncUser = null;
+  let syncReady = false;
+  let syncQueue = { todos:{}, goals:{}, settings:null };
+  let syncInFlight = new Set();
+  let syncStatusText = "同期設定を確認中";
+  let lastSavedState = JSON.parse(JSON.stringify(state));
 
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -104,15 +111,208 @@
       completed: Boolean(t.completed),
       completedAt: t.completedAt || "",
       deleted: Boolean(t.deleted),
+      purged: Boolean(t.purged),
       sortOrder: Number.isFinite(t.sortOrder) ? t.sortOrder : i * 100,
       createdAt: t.createdAt || new Date().toISOString(),
       updatedAt: t.updatedAt || new Date().toISOString()
+    }));
+    merged.goals = merged.goals.map(g => ({
+      ...g,
+      id: g.id || uid("goal"),
+      relatedTodoIds: Array.isArray(g.relatedTodoIds) ? g.relatedTodoIds : [],
+      steps: Array.isArray(g.steps) ? g.steps.map(s => ({
+        id: s.id || uid("step"), title: s.title || "", completed: Boolean(s.completed)
+      })) : [],
+      completed: Boolean(g.completed),
+      deleted: Boolean(g.deleted)
     }));
     return merged;
   }
 
   function saveState() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    state.version = VERSION;
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+    catch (error) { showToast("この端末への保存に失敗しました。空き容量を確認してください"); console.error(error); }
+    if (syncController && syncReady) captureLocalChanges(lastSavedState, state);
+    else if (window.SUSSU_FIREBASE_CONFIG?.apiKey) {
+      const owner = localStorage.getItem("sussu-sync-owner-v7");
+      if (owner) {
+        try {
+          const pending = JSON.parse(localStorage.getItem(syncQueueKey(owner)) || "{}");
+          const waiting = {todos:pending.todos || {}, goals:pending.goals || {}, settings:pending.settings || null};
+          captureLocalChanges(lastSavedState, state, (kind, id, value) => {
+            if (kind === "settings") waiting.settings = value;
+            else waiting[kind][id] = value;
+          });
+          localStorage.setItem(syncQueueKey(owner), JSON.stringify(waiting));
+        } catch (error) { console.warn("同期待ちデータを保存できません", error); }
+      }
+    }
+    lastSavedState = JSON.parse(JSON.stringify(state));
+  }
+
+  function syncQueueKey(uidValue) { return `sussu-sync-pending-v7-${uidValue}`; }
+  function syncHasPending() {
+    return Boolean(syncQueue.settings || Object.keys(syncQueue.todos).length || Object.keys(syncQueue.goals).length);
+  }
+  function setSyncStatus(message) {
+    syncStatusText = message;
+    const banner = $("#syncBanner");
+    if (banner) banner.textContent = syncUser && message !== "同期済み" ? message : "";
+    const status = $("#syncStatus");
+    if (status) status.textContent = message;
+  }
+  function persistQueue() {
+    if (!syncUser) return;
+    try { localStorage.setItem(syncQueueKey(syncUser.uid), JSON.stringify(syncQueue)); }
+    catch (error) { setSyncStatus("同期待ちの変更を端末に保存できません。容量を確認してください"); }
+  }
+  function queueSync(kind, id, value) {
+    if (kind === "settings") syncQueue.settings = JSON.parse(JSON.stringify(value));
+    else syncQueue[kind][id] = JSON.parse(JSON.stringify(value));
+    persistQueue();
+    setSyncStatus("同期中（端末内には保存済み）");
+    flushSyncQueue();
+  }
+  function captureLocalChanges(before, after, enqueue = queueSync) {
+    for (const kind of ["todos", "goals"]) {
+      const previous = new Map(before[kind].map(item => [item.id, item]));
+      const current = new Map(after[kind].map(item => [item.id, item]));
+      for (const [id, item] of current) {
+        if (JSON.stringify(item) !== JSON.stringify(previous.get(id))) enqueue(kind, id, item);
+      }
+      for (const [id, item] of previous) {
+        if (!current.has(id)) enqueue(kind, id, {
+          ...item, deleted:true, ...(kind === "todos" ? {purged:true} : {}),
+          updatedAt:new Date().toISOString()
+        });
+      }
+    }
+    if (JSON.stringify(before.settings) !== JSON.stringify(after.settings)) {
+      enqueue("settings", "settings", after.settings);
+    }
+  }
+  function flushSyncQueue() {
+    if (!syncController || !syncUser || !navigator.onLine) return;
+    const targetUid = syncUser.uid;
+    for (const kind of ["todos", "goals", "settings"]) {
+      const entries = kind === "settings"
+        ? (syncQueue.settings ? [["settings",syncQueue.settings]] : [])
+        : Object.entries(syncQueue[kind]);
+      for (const [id, value] of entries) {
+        const key = kind + ":" + id;
+        if (syncInFlight.has(key)) continue;
+        syncInFlight.add(key);
+        const sent = JSON.stringify(value);
+        syncController.write(kind, id, value).then(() => {
+          if (syncUser?.uid !== targetUid) return;
+          if (kind === "settings") {
+            if (JSON.stringify(syncQueue.settings) === sent) syncQueue.settings = null;
+          } else if (JSON.stringify(syncQueue[kind][id]) === sent) {
+            delete syncQueue[kind][id];
+          }
+          persistQueue();
+          setSyncStatus(syncHasPending() ? "同期中（端末内には保存済み）" : "同期済み");
+          syncInFlight.delete(key);
+          flushSyncQueue();
+        }).catch(error => {
+          if (syncUser?.uid !== targetUid) return;
+          syncInFlight.delete(key);
+          console.warn("同期エラー", error);
+          setSyncStatus("同期できていません。通信・Firestoreルールを確認し、設定から再試行してください");
+        });
+      }
+    }
+  }
+  function hasLocalContent(candidate) {
+    return candidate.todos.some(t => !t.purged) ||
+      candidate.goals.some(g => !g.deleted) ||
+      JSON.stringify(candidate.settings) !== JSON.stringify(DEFAULT_STATE.settings);
+  }
+  function applyRemoteData(remote) {
+    const withPending = (kind, serverItems) => {
+      const items = new Map(serverItems.map(item => [item.id, item]));
+      for (const [id, item] of Object.entries(syncQueue[kind])) items.set(id, item);
+      return Array.from(items.values());
+    };
+    state = normalizeState({
+      settings:syncQueue.settings || remote.settings || DEFAULT_STATE.settings,
+      todos:withPending("todos", remote.todos),
+      goals:withPending("goals", remote.goals)
+    });
+    lastSavedState = JSON.parse(JSON.stringify(state));
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+    catch (error) { setSyncStatus("端末内に保存できません。容量を確認してください"); }
+    renderAll();
+    carryWeeksForward();
+  }
+  function remoteChanged(remote) {
+    if (!syncUser) return;
+    if (!syncReady) {
+      const ownerKey = "sussu-sync-owner-v7";
+      let oldOwner = localStorage.getItem(ownerKey);
+      // ログイン直前のデータを保持。元の画面を初期化せず、設定から書き出せる。
+      if (oldOwner !== syncUser.uid && hasLocalContent(state)) {
+        try { localStorage.setItem("sussu-before-sync-v7", JSON.stringify(state)); }
+        catch (error) { setSyncStatus("移行前の保存先が不足しています。JSONを先に書き出してください"); return; }
+        const cloudHasContent = remote.todos.length || remote.goals.length || remote.hasSettings;
+        const question = cloudHasContent
+          ? "この端末のTodoと目標をクラウドのデータに追加しますか？\nOK: 項目を追加（同じIDはクラウド優先） / キャンセル: クラウドの内容を表示\n元データは設定から書き出せます。"
+          : "この端末のTodoと目標をクラウドに取り込みますか？\nOK: 取り込む / キャンセル: この端末の内容を保管して空のクラウドを表示";
+        if (confirm(question)) {
+          const remoteTodoIds = new Set(remote.todos.map(t => t.id));
+          const remoteGoalIds = new Set(remote.goals.map(g => g.id));
+          for (const item of state.todos) if (!remoteTodoIds.has(item.id)) syncQueue.todos[item.id] = item;
+          for (const item of state.goals) if (!remoteGoalIds.has(item.id)) syncQueue.goals[item.id] = item;
+          if (!remote.hasSettings) syncQueue.settings = state.settings;
+        }
+      } else if (!remote.hasSettings) {
+        syncQueue.settings = state.settings;
+      }
+      localStorage.setItem(ownerKey, syncUser.uid);
+      oldOwner = syncUser.uid;
+      persistQueue();
+      syncReady = true;
+    }
+    applyRemoteData(remote);
+    setSyncStatus(syncHasPending() ? "同期中（端末内には保存済み）" : "同期済み");
+    flushSyncQueue();
+  }
+  function startSync() {
+    const config = window.SUSSU_FIREBASE_CONFIG;
+    if (!config || !config.apiKey || !config.projectId || !config.appId || !config.authDomain) {
+      setSyncStatus("同期未設定：firebase-config.js と Firebase 側の設定が必要です");
+      return;
+    }
+    setSyncStatus("同期サービスに接続中");
+    import("./sync.js").then(module => module.createSyncApp(config, {
+      auth(user) {
+        syncUser = user;
+        syncReady = false;
+        syncInFlight = new Set();
+        syncQueue = {todos:{}, goals:{}, settings:null};
+        if (user) {
+          try {
+            const saved = JSON.parse(localStorage.getItem(syncQueueKey(user.uid)) || "{}");
+            syncQueue = {todos:saved.todos || {}, goals:saved.goals || {}, settings:saved.settings || null};
+          } catch (error) { console.warn(error); }
+        }
+        setSyncStatus(user ? "クラウドのデータを確認中" : "同期するには設定からログインしてください");
+        renderSyncSettings();
+      },
+      remote:remoteChanged,
+      error(error) {
+        console.warn("同期エラー", error);
+        setSyncStatus("同期できません。接続やFirebase側の設定を確認してください");
+      }
+    })).then(client => {
+      syncController = client;
+      renderSyncSettings();
+      window.addEventListener("online", flushSyncQueue);
+    }).catch(error => {
+      console.warn("Firebase を読み込めません", error);
+      setSyncStatus("同期機能を読み込めません。接続を確認してください");
+    });
   }
 
   function todayISO() {
@@ -165,11 +365,11 @@
   }
 
   function currentYear() {
-    return String(parseISODate(selectedDate).getFullYear());
+    return todayISO().slice(0, 4);
   }
 
   function currentMonthKey() {
-    return selectedDate.slice(0, 7);
+    return todayISO().slice(0, 7);
   }
 
   function priorityKey(todo) {
@@ -185,7 +385,7 @@
   }
 
   function activeTodos() {
-    return state.todos.filter(t => !t.deleted && !t.completed);
+    return state.todos.filter(t => !t.deleted && !t.completed && !t.purged);
   }
 
   function escapeHTML(str = "") {
@@ -320,6 +520,10 @@
         ? todos.map(matrixCardHTML).join("")
         : `<div class="empty-note">Todoなし</div>`;
     });
+    const usedCategoryIds = new Set(activeTodos().map(t => t.categoryId));
+    $("#categoryLegend").innerHTML = state.settings.categories
+      .filter(cat => usedCategoryIds.has(cat.id))
+      .map(cat => `<span class="category-key" style="--cat-color:${safeColor(cat.color)}"><i aria-hidden="true"></i>${escapeHTML(cat.name)}</span>`).join("");
     attachMatrixInteractions();
   }
 
@@ -328,16 +532,23 @@
     const due = todo.dueDate ? `<span class="badge">期限 ${escapeHTML(formatMD(todo.dueDate))}</span>` : "";
     const exec = todo.executionDate ? `<span class="badge">実行 ${escapeHTML(formatMD(todo.executionDate))}</span>` : "";
     const catBadge = cat
-      ? `<span class="badge category-badge" style="--cat-color:${safeColor(cat.color)}">${escapeHTML(cat.name)}</span>`
+      ? `<span class="badge category-badge" style="--cat-color:${safeColor(cat.color)}"><i aria-hidden="true"></i>${escapeHTML(cat.name)}</span>`
       : "";
     const subDone = todo.subtasks.filter(s => s.completed).length;
     const sub = todo.subtasks.length ? `<span class="badge">${subDone}/${todo.subtasks.length}</span>` : "";
+    const subtaskList = todo.subtasks.length ? `<ul class="matrix-subtasks" aria-label="サブTodo">
+      ${todo.subtasks.map(s => `<li class="${s.completed ? "is-complete" : ""}">
+        <span class="matrix-subtask-mark" aria-hidden="true">${s.completed ? "✓" : ""}</span>
+        <span>${escapeHTML(s.title)}</span>
+      </li>`).join("")}
+    </ul>` : "";
     return `
       <article class="todo-card" data-id="${todo.id}" style="--priority-color:${priorityColor(todo)}">
         <button class="complete-btn" type="button" aria-label="完了" data-complete="${todo.id}"></button>
         <button class="todo-main item-main" type="button" data-edit="${todo.id}">
           <div class="todo-title">${escapeHTML(todo.title)}</div>
           <div class="todo-meta">${catBadge}${due}${exec}${sub}</div>
+          ${subtaskList}
         </button>
         <button class="drag-handle" type="button" aria-label="ドラッグして移動" data-drag="${todo.id}">⋮⋮</button>
       </article>
@@ -362,9 +573,11 @@
 
   function renderSchedule() {
     $("#selectedDateLabel").textContent = formatDateJa(selectedDate);
-    $("#weekRangeLabel").textContent = weekRangeText(selectedDate);
+    const weekKey = startOfWeek(todayISO());
+    const nextWeekKey = addDays(weekKey, 7);
+    $("#weekRangeLabel").textContent = weekRangeText(weekKey);
+    $("#nextWeekRangeLabel").textContent = weekRangeText(nextWeekKey);
 
-    const weekKey = startOfWeek(selectedDate);
     const weekTodos = activeTodos()
       .filter(t => t.weekKey === weekKey)
       .sort((a,b) => a.sortOrder - b.sortOrder || a.createdAt.localeCompare(b.createdAt));
@@ -372,6 +585,13 @@
     $("#weekTodoList").innerHTML = weekTodos.length
       ? weekTodos.map(t => compactTodoHTML(t, "week")).join("")
       : `<div class="empty-note">今週のTodoはありません</div>`;
+
+    const nextWeekTodos = activeTodos()
+      .filter(t => t.weekKey === nextWeekKey)
+      .sort((a,b) => a.sortOrder - b.sortOrder || a.createdAt.localeCompare(b.createdAt));
+    $("#nextWeekTodoList").innerHTML = nextWeekTodos.length
+      ? nextWeekTodos.map(t => compactTodoHTML(t, "next-week")).join("")
+      : `<div class="empty-note">来週のTodoはありません</div>`;
 
     const dayTodos = activeTodos()
       .filter(t => t.executionDate === selectedDate)
@@ -384,8 +604,8 @@
 
     renderTimeline(dayTodos.filter(t => t.startTime));
 
-    const yearGoals = state.goals.filter(g => g.type === "year" && g.period === currentYear());
-    const monthGoals = state.goals.filter(g => g.type === "month" && g.period === currentMonthKey());
+    const yearGoals = state.goals.filter(g => !g.deleted && g.type === "year" && g.period === currentYear());
+    const monthGoals = state.goals.filter(g => !g.deleted && g.type === "month" && g.period === currentMonthKey());
     $("#yearGoalSummary").textContent = goalSummary(yearGoals);
     $("#monthGoalSummary").textContent = goalSummary(monthGoals);
 
@@ -395,7 +615,7 @@
   function compactTodoHTML(todo, context) {
     const cat = categoryFor(todo.categoryId);
     const meta = [];
-    if (todo.executionDate && context === "week") meta.push(formatMD(todo.executionDate));
+    if (todo.executionDate && (context === "week" || context === "next-week")) meta.push(formatMD(todo.executionDate));
     if (todo.startTime) meta.push(todo.startTime);
     if (todo.dueDate) meta.push(`期限 ${formatMD(todo.dueDate)}`);
     if (cat) meta.push(cat.name);
@@ -511,8 +731,11 @@
 
   function goalSummary(goals) {
     if (!goals.length) return "未設定";
-    const done = goals.filter(g => Number(g.progress || 0) >= 100).length;
-    return `${goals.length}件 / 完了 ${done}件`;
+    const done = goals.filter(g => g.completed).length;
+    const steps = goals.flatMap(g => g.steps || []);
+    return steps.length
+      ? `目標 ${done}/${goals.length}件・取組 ${steps.filter(s => s.completed).length}/${steps.length}件`
+      : `目標 ${done}/${goals.length}件`;
   }
 
   function completeTodo(id) {
@@ -525,7 +748,9 @@
     saveState();
     renderAll();
     showUndoToast(`「${todo.title}」を完了しました`, () => {
-      Object.assign(todo, before);
+      const current = state.todos.find(t => t.id === id);
+      if (!current) return;
+      Object.assign(current, before);
       saveState();
       renderAll();
     });
@@ -541,7 +766,9 @@
     closeModal();
     renderAll();
     showUndoToast("Todoを削除しました", () => {
-      Object.assign(todo, before);
+      const current = state.todos.find(t => t.id === id);
+      if (!current) return;
+      Object.assign(current, before);
       saveState();
       renderAll();
     });
@@ -559,10 +786,13 @@
   }
 
   function purgeCompleted() {
-    const count = state.todos.filter(t => t.completed || t.deleted).length;
+    const count = state.todos.filter(t => !t.purged && (t.completed || t.deleted)).length;
     if (!count) return;
     if (!confirm("完了一覧・削除済みTodoをすべて完全削除しますか？")) return;
-    state.todos = state.todos.filter(t => !t.completed && !t.deleted);
+    const now = new Date().toISOString();
+    state.todos.forEach(t => {
+      if (t.completed || t.deleted) { t.purged = true; t.updatedAt = now; }
+    });
     saveState();
     renderAll();
     openCompletedModal();
@@ -655,11 +885,12 @@
                 </div>
 
                 <div class="field full">
-                  <label>今週やること</label>
-                  <label class="check-line">
-                    <input id="todoThisWeek" type="checkbox" ${todo.weekKey ? "checked" : ""} />
-                    <span>選択中の週（${escapeHTML(weekRangeText(selectedDate))}）に表示する</span>
-                  </label>
+                  <label for="todoWeek">週の予定</label>
+                  <select id="todoWeek">
+                    <option value="" ${!todo.weekKey ? "selected" : ""}>指定しない</option>
+                    <option value="${startOfWeek(todayISO())}" ${todo.weekKey === startOfWeek(todayISO()) ? "selected" : ""}>今週（${escapeHTML(weekRangeText(todayISO()))}）</option>
+                    <option value="${addDays(startOfWeek(todayISO()), 7)}" ${todo.weekKey === addDays(startOfWeek(todayISO()), 7) ? "selected" : ""}>来週（${escapeHTML(weekRangeText(addDays(startOfWeek(todayISO()), 7)))}）</option>
+                  </select>
                 </div>
 
                 <div class="field full">
@@ -733,7 +964,7 @@
         endTime,
         importance: $("#todoImportance").value,
         urgency: $("#todoUrgency").value,
-        weekKey: $("#todoThisWeek").checked ? startOfWeek(selectedDate) : "",
+        weekKey: $("#todoWeek").value,
         subtasks: workingSubtasks
           .map(s => ({ id: s.id || uid("sub"), title: (s.title || "").trim(), completed: Boolean(s.completed) }))
           .filter(s => s.title),
@@ -741,9 +972,11 @@
       };
 
       if (existing) {
-        const changedQuadrant = existing.importance !== data.importance || existing.urgency !== data.urgency;
-        Object.assign(existing, data);
-        if (changedQuadrant) existing.sortOrder = nextSortOrder(data.importance, data.urgency);
+        const current = state.todos.find(t => t.id === existing.id);
+        if (!current) { alert("このTodoが見つかりません。画面を開き直してください。"); return; }
+        const changedQuadrant = current.importance !== data.importance || current.urgency !== data.urgency;
+        Object.assign(current, data);
+        if (changedQuadrant) current.sortOrder = nextSortOrder(data.importance, data.urgency);
       } else {
         state.todos.push({
           id: uid("todo"),
@@ -792,10 +1025,10 @@
 
   function openCompletedModal() {
     const completed = state.todos
-      .filter(t => t.completed && !t.deleted)
+      .filter(t => t.completed && !t.deleted && !t.purged)
       .sort((a,b) => (b.completedAt || "").localeCompare(a.completedAt || ""));
     const deleted = state.todos
-      .filter(t => t.deleted)
+      .filter(t => t.deleted && !t.purged)
       .sort((a,b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
 
     $("#modalRoot").innerHTML = `
@@ -860,6 +1093,11 @@
           </div>
           <div class="modal-body">
             <div class="settings-group">
+              <h3>端末間の同期</h3>
+              <div id="syncSettings"></div>
+            </div>
+
+            <div class="settings-group">
               <h3>優先順位カラー</h3>
               ${priorityColorRow("high-high", "重要・緊急")}
               ${priorityColorRow("high-low", "重要・非緊急")}
@@ -894,6 +1132,12 @@
                 </label>
               </div>
               <p style="font-size:12px;color:var(--muted)">JSON形式でバックアップできます。</p>
+              ${localStorage.getItem("sussu-before-sync-v7") ? `<button id="exportBeforeSyncBtn" class="secondary-btn" type="button">同期前の端末データを書き出す</button>` : ""}
+            </div>
+
+            <div class="settings-group">
+              <h3>アプリの更新</h3>
+              <button id="openUpdatePageBtn" class="secondary-btn" type="button">更新確認ページを開く</button>
             </div>
 
             <div class="settings-group">
@@ -908,6 +1152,7 @@
     `;
     bindModalClose();
     renderCategorySettings();
+    renderSyncSettings();
 
     // Delegation also handles category rows rebuilt after adding or removing one.
     $("#modalRoot").onclick = event => {
@@ -945,7 +1190,63 @@
     };
 
     $("#exportBtn").onclick = exportData;
+    $("#openUpdatePageBtn").onclick = () => { location.href = "./update.html"; };
     $("#importInput").onchange = importData;
+    if ($("#exportBeforeSyncBtn")) $("#exportBeforeSyncBtn").onclick = () => {
+      const blob = new Blob([localStorage.getItem("sussu-before-sync-v7")], {type:"application/json"});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `sussu-before-sync-${todayISO()}.json`; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    };
+  }
+
+  function renderSyncSettings() {
+    const host = $("#syncSettings");
+    if (!host) return;
+    const configured = Boolean(window.SUSSU_FIREBASE_CONFIG?.apiKey);
+    host.innerHTML = `<p class="sync-status" id="syncStatus">${escapeHTML(syncStatusText)}</p>` +
+      (!configured ? `<p class="sync-setup">Firebase の設定がまだ入っていません。付属の「同期設定の手順」を参照してください。設定するまでは、この端末に保存して使えます。</p>` :
+      syncUser ? `<p>ログイン中：<strong>${escapeHTML(syncUser.email || "ユーザー")}</strong></p>
+        <div class="sync-actions"><button class="secondary-btn" type="button" id="syncRetryBtn">同期を再試行</button>
+        <button class="secondary-btn" type="button" id="syncSignOutBtn">ログアウト</button></div>` :
+      `<form id="syncAuthForm" class="sync-auth-form">
+        <label>メールアドレス<input id="syncEmail" type="email" autocomplete="email" required /></label>
+        <label>パスワード<input id="syncPassword" type="password" autocomplete="current-password" minlength="6" required /></label>
+        <div class="sync-actions"><button id="syncSignInBtn" class="primary-btn" type="submit">ログイン</button>
+        <button id="syncSignUpBtn" class="secondary-btn" type="button">新規登録</button></div>
+      </form>`);
+    if (!configured || !syncController) return;
+    if (syncUser) {
+      $("#syncRetryBtn").onclick = flushSyncQueue;
+      $("#syncSignOutBtn").onclick = async () => {
+        if (syncHasPending() && !confirm("未同期の変更があります。ログアウトすると、この端末に保管されます。続行しますか？")) return;
+        await syncController.signOut();
+        // 共有PCの画面にはログアウト後の個人データを残さない。
+        localStorage.removeItem("sussu-sync-owner-v7");
+        state = cloneDefaultState();
+        lastSavedState = JSON.parse(JSON.stringify(state));
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        renderAll();
+      };
+      return;
+    }
+    const form = $("#syncAuthForm");
+    async function submitAuth(create) {
+      const email = $("#syncEmail").value.trim();
+      const password = $("#syncPassword").value;
+      if (!form.reportValidity()) return;
+      try {
+        setSyncStatus(create ? "アカウントを登録中" : "ログイン中");
+        if (create) await syncController.signUp(email, password);
+        else await syncController.signIn(email, password);
+      } catch (error) {
+        console.warn(error);
+        setSyncStatus("ログインできません。メールアドレス・パスワードとFirebaseの設定を確認してください");
+      }
+    }
+    form.onsubmit = event => { event.preventDefault(); submitAuth(false); };
+    $("#syncSignUpBtn").onclick = () => submitAuth(true);
   }
 
   function priorityColorRow(key, label) {
@@ -1023,7 +1324,9 @@
       const parsed = JSON.parse(text);
       const candidate = parsed.data || parsed;
       if (!candidate || !Array.isArray(candidate.todos)) throw new Error("形式が不正です");
-      if (!confirm("現在のデータを読み込んだバックアップで置き換えますか？")) return;
+      if (!confirm(syncReady
+        ? "バックアップを読み込みますか？ 現在のデータと同期先の全端末に反映され、バックアップにない項目は削除扱いになります。先に現在のデータを書き出してください。"
+        : "現在のデータを読み込んだバックアップで置き換えますか？")) return;
       state = normalizeState(candidate);
       saveState();
       renderAll();
@@ -1041,7 +1344,30 @@
     const title = type === "year"
       ? `${period}年の目標`
       : `${Number(period.slice(5,7))}月の目標`;
-    const goals = state.goals.filter(g => g.type === type && g.period === period);
+    const goals = state.goals.filter(g => !g.deleted && g.type === type && g.period === period);
+    const openGoals = goals.filter(g => !g.completed);
+    const completedGoals = goals.filter(g => g.completed);
+    const goalRow = g => {
+      const steps = (g.steps || []).slice().sort((a,b) => Number(a.completed) - Number(b.completed));
+      const done = steps.filter(s => s.completed).length;
+      return `<div class="goal-entry">
+        <div class="goal-row">
+          <label class="goal-complete-label">
+            <input type="checkbox" data-complete-goal="${escapeHTML(g.id)}" ${g.completed ? "checked" : ""} />
+            <strong>${escapeHTML(g.title)}</strong>
+          </label>
+          <button class="secondary-btn" type="button" data-edit-goal="${escapeHTML(g.id)}">編集</button>
+        </div>
+        ${steps.length ? `<div class="goal-progress" aria-label="進捗 ${done}/${steps.length}件"><div style="width:${Math.round(done / steps.length * 100)}%"></div></div>
+          <small>進捗項目 ${done}/${steps.length}件</small>
+          <div class="goal-step-list">${steps.map(s => `
+            <label class="${s.completed ? "done" : ""}">
+              <input type="checkbox" data-goal-step="${escapeHTML(g.id)}" data-step-id="${escapeHTML(s.id)}" ${s.completed ? "checked" : ""} />
+              <span>${escapeHTML(s.title)}</span>
+            </label>`).join("")}</div>` : `<small>進捗項目は未登録</small>`}
+        <div class="todo-meta"><span class="badge">関連Todo ${(g.relatedTodoIds || []).length}件</span></div>
+      </div>`;
+    };
 
     $("#modalRoot").innerHTML = `
       <div class="modal-backdrop" data-close-backdrop>
@@ -1052,21 +1378,11 @@
           </div>
           <div class="modal-body">
             <div class="goal-list">
-              ${goals.length ? goals.map(g => `
-                <div class="goal-row">
-                  <div>
-                    <strong>${escapeHTML(g.title)}</strong>
-                    <div class="todo-meta">
-                      <span class="badge">進捗 ${Number(g.progress || 0)}%</span>
-                      <span class="badge">関連Todo ${(g.relatedTodoIds || []).length}件</span>
-                    </div>
-                  </div>
-                  <button class="secondary-btn" type="button" data-edit-goal="${g.id}">編集</button>
-                  <span></span>
-                </div>
-              `).join("") : `<div class="empty-note">目標はまだありません</div>`}
+              ${openGoals.length ? openGoals.map(goalRow).join("") : `<div class="empty-note">未完了の目標はありません</div>`}
             </div>
             <button id="addGoalBtn" class="primary-btn" type="button">＋ 目標を追加</button>
+            ${completedGoals.length ? `<details class="goal-list goal-completed"><summary>完了した目標（${completedGoals.length}件）</summary>
+              ${completedGoals.map(goalRow).join("")}</details>` : ""}
           </div>
         </div>
       </div>
@@ -1074,6 +1390,21 @@
     bindModalClose();
     $("#addGoalBtn").onclick = () => openGoalEditModal(type, period);
     $$("[data-edit-goal]").forEach(btn => btn.onclick = () => openGoalEditModal(type, period, btn.dataset.editGoal));
+    $$("[data-complete-goal]").forEach(box => box.onchange = () => {
+      const goal = state.goals.find(g => g.id === box.dataset.completeGoal);
+      if (!goal) return;
+      goal.completed = box.checked;
+      goal.updatedAt = new Date().toISOString();
+      saveState(); renderAll(); openGoalsModal(type);
+    });
+    $$("[data-goal-step]").forEach(box => box.onchange = () => {
+      const goal = state.goals.find(g => g.id === box.dataset.goalStep);
+      const step = goal && goal.steps.find(s => s.id === box.dataset.stepId);
+      if (!step) return;
+      step.completed = box.checked;
+      goal.updatedAt = new Date().toISOString();
+      saveState(); renderAll(); openGoalsModal(type);
+    });
   }
 
   function openGoalEditModal(type, period, goalId = null) {
@@ -1085,10 +1416,11 @@
       title: "",
       details: "",
       dueDate: "",
-      progress: 0,
-      relatedTodoIds: []
+      relatedTodoIds: [],
+      steps: []
     };
     const todos = activeTodos();
+    let workingSteps = (goal.steps || []).map(s => ({...s}));
 
     $("#modalRoot").innerHTML = `
       <div class="modal-backdrop" data-close-backdrop>
@@ -1112,17 +1444,19 @@
                   <label>期限</label>
                   <input id="goalDueDate" type="date" value="${escapeHTML(goal.dueDate)}" />
                 </div>
-                <div class="field">
-                  <label>進捗（0〜100%）</label>
-                  <input id="goalProgress" type="number" min="0" max="100" step="5" value="${Number(goal.progress || 0)}" />
-                </div>
+              </div>
+              <div class="field">
+                <label>進捗項目</label>
+                <p class="field-hint">チェックした項目は下へ移動します。達成状況は目標一覧に表示されます。</p>
+                <div id="goalStepRows" class="goal-step-editor"></div>
+                <button id="addGoalStepBtn" class="secondary-btn" type="button">＋ 項目を追加</button>
               </div>
               <div class="field">
                 <label>関連Todo</label>
                 <div class="goal-checklist">
                   ${todos.length ? todos.map(t => `
                     <label>
-                      <input type="checkbox" data-goal-todo="${t.id}" ${(goal.relatedTodoIds || []).includes(t.id) ? "checked" : ""} />
+                      <input type="checkbox" data-goal-todo="${escapeHTML(t.id)}" ${(goal.relatedTodoIds || []).includes(t.id) ? "checked" : ""} />
                       <span>${escapeHTML(t.title)}</span>
                     </label>
                   `).join("") : `<div class="empty-note">関連付けられるTodoがありません</div>`}
@@ -1138,6 +1472,30 @@
       </div>
     `;
     bindModalClose();
+    function renderGoalSteps() {
+      workingSteps.sort((a,b) => Number(a.completed) - Number(b.completed));
+      $("#goalStepRows").innerHTML = workingSteps.length ? workingSteps.map((s,i) => `
+        <div class="goal-step-edit-row">
+          <input type="checkbox" data-step-check="${i}" ${s.completed ? "checked" : ""} aria-label="進捗項目を完了" />
+          <input type="text" data-step-title="${i}" value="${escapeHTML(s.title)}" maxlength="160" placeholder="達成すること" aria-label="進捗項目" />
+          <button type="button" class="icon-btn" data-step-remove="${i}" aria-label="項目を削除">×</button>
+        </div>`).join("") : `<div class="empty-note">項目はまだありません</div>`;
+      $$("[data-step-title]").forEach(input => input.oninput = () => { workingSteps[Number(input.dataset.stepTitle)].title = input.value; });
+      $$("[data-step-check]").forEach(input => input.onchange = () => {
+        workingSteps[Number(input.dataset.stepCheck)].completed = input.checked;
+        renderGoalSteps();
+      });
+      $$("[data-step-remove]").forEach(btn => btn.onclick = () => {
+        workingSteps.splice(Number(btn.dataset.stepRemove), 1); renderGoalSteps();
+      });
+    }
+    renderGoalSteps();
+    $("#addGoalStepBtn").onclick = () => {
+      workingSteps.push({ id: uid("step"), title: "", completed: false });
+      renderGoalSteps();
+      const fields = $$("[data-step-title]");
+      fields[fields.length - 1]?.focus();
+    };
 
     $("#goalForm").onsubmit = e => {
       e.preventDefault();
@@ -1147,12 +1505,16 @@
         title: $("#goalTitle").value.trim(),
         details: $("#goalDetails").value.trim(),
         dueDate: $("#goalDueDate").value,
-        progress: Math.max(0, Math.min(100, Number($("#goalProgress").value || 0))),
-        relatedTodoIds: $$("[data-goal-todo]").filter(x => x.checked).map(x => x.dataset.goalTodo)
+        relatedTodoIds: $$("[data-goal-todo]").filter(x => x.checked).map(x => x.dataset.goalTodo),
+        steps: workingSteps.map(s => ({id:s.id, title:s.title.trim(), completed:s.completed})).filter(s => s.title)
       };
       if (!data.title) return;
 
-      if (existing) Object.assign(existing, data, { updatedAt: new Date().toISOString() });
+      if (existing) {
+        const current = state.goals.find(g => g.id === existing.id);
+        if (!current) { alert("この目標が見つかりません。画面を開き直してください。"); return; }
+        Object.assign(current, data, { updatedAt: new Date().toISOString() });
+      }
       else state.goals.push({ id: uid("goal"), ...data, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
 
       saveState();
@@ -1163,7 +1525,10 @@
     if (existing) {
       $("#deleteGoalBtn").onclick = () => {
         if (!confirm("この目標を削除しますか？")) return;
-        state.goals = state.goals.filter(g => g.id !== existing.id);
+        const current = state.goals.find(g => g.id === existing.id);
+        if (!current) return;
+        current.deleted = true;
+        current.updatedAt = new Date().toISOString();
         saveState();
         renderAll();
         openGoalsModal(type);
@@ -1218,6 +1583,29 @@
     $$(".page").forEach(p => p.classList.toggle("active", p.id === pageId));
     $$(".tab").forEach(t => t.classList.toggle("active", t.dataset.page === pageId));
     window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function carryWeeksForward() {
+    const current = startOfWeek(todayISO());
+    const now = new Date().toISOString();
+    const overdue = activeTodos().filter(t => /^\d{4}-\d{2}-\d{2}$/.test(t.weekKey) && t.weekKey < current);
+    if (!overdue.length) return;
+    overdue.forEach(t => { t.weekKey = current; t.updatedAt = now; });
+    saveState();
+    renderAll();
+  }
+
+  function scheduleWeekBoundary() {
+    const now = new Date();
+    const next = new Date(now);
+    next.setHours(0, 0, 0, 0);
+    const daysUntilMonday = ((8 - now.getDay()) % 7) || 7;
+    next.setDate(next.getDate() + daysUntilMonday);
+    setTimeout(() => {
+      carryWeeksForward();
+      renderSchedule();
+      scheduleWeekBoundary();
+    }, Math.max(100, next.getTime() - now.getTime() + 100));
   }
 
   function checkYesterdayCarryover() {
@@ -1411,7 +1799,8 @@
     });
 
     $("#addMatrixTodoBtn").onclick = () => openTodoModal(null, { importance: "high", urgency: "high" });
-    $("#addWeekTodoBtn").onclick = () => openTodoModal(null, { weekKey: startOfWeek(selectedDate) });
+    $("#addWeekTodoBtn").onclick = () => openTodoModal(null, { weekKey: startOfWeek(todayISO()) });
+    $("#addNextWeekTodoBtn").onclick = () => openTodoModal(null, { weekKey: addDays(startOfWeek(todayISO()), 7) });
     $("#addDayTodoBtn").onclick = () => openTodoModal(null, { executionDate: selectedDate });
     $("#addCalendarTodoBtn").onclick = () => openTodoModal(null, { executionDate: calendarSelectedDate });
     $("#calendarAddForDateBtn").onclick = () => openTodoModal(null, { executionDate: calendarSelectedDate });
@@ -1459,8 +1848,18 @@
     seedSampleDataIfWanted();
     initEvents();
     renderAll();
+    carryWeeksForward();
+    scheduleWeekBoundary();
+    let lastSeenDay = todayISO();
+    setInterval(() => {
+      if (lastSeenDay !== todayISO()) { lastSeenDay = todayISO(); carryWeeksForward(); renderSchedule(); }
+    }, 30 * 1000);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) { lastSeenDay = todayISO(); carryWeeksForward(); renderSchedule(); }
+    });
     checkYesterdayCarryover();
     registerPWA();
+    startSync();
   }
 
   init();

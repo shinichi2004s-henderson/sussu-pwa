@@ -23,7 +23,7 @@
       try {
         const response = await fetch("./sw.js?check=" + Date.now(), { cache: "no-store" });
         const source = await response.text();
-        if (!response.ok || !source.includes('sussu-cache-v6')) {
+        if (!response.ok || !source.includes('sussu-cache-v8')) {
           status.textContent = "古いフォルダから起動しています。サーバーを止め、今回のZIPを展開した sussu-pwa フォルダで起動し直してください。";
           return;
         }

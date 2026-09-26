@@ -1,9 +1,11 @@
-const CACHE_NAME = "sussu-cache-v6";
+const CACHE_NAME = "sussu-cache-v8";
 const ASSETS = [
   "./",
   "./index.html",
   "./styles.css",
   "./app.js",
+  "./sync.js",
+  "./firebase-config.js",
   "./manifest.webmanifest",
   "./icon-192.png",
   "./icon-512.png"
