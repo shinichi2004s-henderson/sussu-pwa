@@ -1,4 +1,4 @@
-const CACHE_NAME = "sussu-cache-v8";
+const CACHE_NAME = "sussu-cache-v9";
 const ASSETS = [
   "./",
   "./index.html",

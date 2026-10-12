@@ -2,7 +2,7 @@
   "use strict";
 
   const STORAGE_KEY = "sussu-data-v1";
-  const VERSION = 8;
+  const VERSION = 9;
   // The same 16 choices are used for priority and category colors.
   const COLOR_PALETTE = [
     ["赤", "#d95c5c"], ["濃い赤", "#b94359"], ["オレンジ", "#d58a37"], ["黄", "#d4a72c"],
@@ -107,7 +107,11 @@
       importance: t.importance === "low" ? "low" : "high",
       urgency: t.urgency === "low" ? "low" : "high",
       weekKey: t.weekKey || "",
-      subtasks: Array.isArray(t.subtasks) ? t.subtasks : [],
+      subtasks: Array.isArray(t.subtasks) ? t.subtasks.map(s => ({
+        id: s.id || uid("sub"), title: s.title || "", completed: Boolean(s.completed),
+        executionDate: s.executionDate || ""
+      })) : [],
+      urgencyPromptKey: t.urgencyPromptKey || "",
       completed: Boolean(t.completed),
       completedAt: t.completedAt || "",
       deleted: Boolean(t.deleted),
@@ -245,6 +249,7 @@
     catch (error) { setSyncStatus("端末内に保存できません。容量を確認してください"); }
     renderAll();
     carryWeeksForward();
+    promptForUrgentTodos();
   }
   function remoteChanged(remote) {
     if (!syncUser) return;
@@ -336,6 +341,45 @@
     const d = parseISODate(dateStr);
     d.setDate(d.getDate() + n);
     return localISODate(d);
+  }
+
+  function nearUrgencyDates(todo, today = todayISO()) {
+    const latest = addDays(today, 5);
+    return [todo.dueDate, todo.executionDate]
+      .filter(date => date && date >= today && date <= latest);
+  }
+
+  function urgencyDateKey(todo) {
+    return `${todo.dueDate || ""}|${todo.executionDate || ""}`;
+  }
+
+  function askToMakeUrgent(todo) {
+    const dates = nearUrgencyDates(todo);
+    if (todo.urgency !== "low" || !dates.length || todo.urgencyPromptKey === urgencyDateKey(todo)) return false;
+    const labels = [
+      todo.dueDate && dates.includes(todo.dueDate) ? `期限 ${todo.dueDate}` : "",
+      todo.executionDate && dates.includes(todo.executionDate) ? `実行 ${todo.executionDate}` : ""
+    ].filter(Boolean).join("、");
+    todo.urgencyPromptKey = urgencyDateKey(todo);
+    if (confirm(`「${todo.title}」の${labels}が5日以内です。緊急側へ移動しますか？`)) {
+      todo.urgency = "high";
+      return true;
+    }
+    return false;
+  }
+
+  function promptForUrgentTodos() {
+    let changed = false;
+    for (const todo of activeTodos()) {
+      const beforeMarker = todo.urgencyPromptKey;
+      const beforeUrgency = todo.urgency;
+      if (askToMakeUrgent(todo)) todo.sortOrder = nextSortOrder(todo.importance, "high");
+      if (todo.urgencyPromptKey !== beforeMarker || todo.urgency !== beforeUrgency) {
+        todo.updatedAt = new Date().toISOString();
+        changed = true;
+      }
+    }
+    if (changed) { saveState(); renderAll(); }
   }
 
   function startOfWeek(dateStr) {
@@ -539,7 +583,7 @@
     const subtaskList = todo.subtasks.length ? `<ul class="matrix-subtasks" aria-label="サブTodo">
       ${todo.subtasks.map(s => `<li class="${s.completed ? "is-complete" : ""}">
         <span class="matrix-subtask-mark" aria-hidden="true">${s.completed ? "✓" : ""}</span>
-        <span>${escapeHTML(s.title)}</span>
+        <span>${escapeHTML(s.title)}${s.executionDate ? ` <small>実行 ${escapeHTML(formatMD(s.executionDate))}</small>` : ""}</span>
       </li>`).join("")}
     </ul>` : "";
     return `
@@ -550,7 +594,11 @@
           <div class="todo-meta">${catBadge}${due}${exec}${sub}</div>
           ${subtaskList}
         </button>
-        <button class="drag-handle" type="button" aria-label="ドラッグして移動" data-drag="${todo.id}">⋮⋮</button>
+        <div class="matrix-order-controls">
+          <button type="button" data-move-up="${todo.id}" aria-label="${escapeHTML(todo.title)}を上へ">↑</button>
+          <button type="button" data-move-down="${todo.id}" aria-label="${escapeHTML(todo.title)}を下へ">↓</button>
+          <button class="drag-handle" type="button" aria-label="ドラッグして移動" data-drag="${todo.id}">⋮⋮</button>
+        </div>
       </article>
     `;
   }
@@ -568,7 +616,42 @@
         openTodoModal(btn.dataset.edit);
       });
     });
+    for (const direction of ["up", "down"]) {
+      $$(`[data-move-${direction}]`, $("#matrixPage")).forEach(btn => btn.onclick = () =>
+        moveMatrixTodo(btn.dataset[direction === "up" ? "moveUp" : "moveDown"], direction === "up" ? -1 : 1));
+    }
     initPointerDrag();
+  }
+
+  function moveMatrixTodo(id, delta) {
+    const todo = state.todos.find(t => t.id === id);
+    if (!todo) return;
+    const quadrant = activeTodos().filter(t => t.importance === todo.importance && t.urgency === todo.urgency)
+      .sort((a,b) => a.sortOrder - b.sortOrder || a.createdAt.localeCompare(b.createdAt));
+    const from = quadrant.findIndex(t => t.id === id);
+    const to = from + delta;
+    if (to < 0 || to >= quadrant.length) return;
+    [quadrant[from], quadrant[to]] = [quadrant[to], quadrant[from]];
+    const now = new Date().toISOString();
+    quadrant.forEach((item, i) => { item.sortOrder = (i + 1) * 100; item.updatedAt = now; });
+    saveState();
+    renderAll();
+  }
+
+  function sortMatrixByExecutionDate() {
+    const now = new Date().toISOString();
+    let changed = false;
+    for (const importance of ["high", "low"]) for (const urgency of ["high", "low"]) {
+      const quadrant = activeTodos().filter(t => t.importance === importance && t.urgency === urgency)
+        .sort((a,b) => (a.executionDate || "9999-12-31").localeCompare(b.executionDate || "9999-12-31") ||
+          a.sortOrder - b.sortOrder || a.createdAt.localeCompare(b.createdAt));
+      quadrant.forEach((item, i) => {
+        const order = (i + 1) * 100;
+        if (item.sortOrder !== order) { item.sortOrder = order; item.updatedAt = now; changed = true; }
+      });
+    }
+    if (changed) { saveState(); renderAll(); }
+    showToast("各マスを実行日順に並び替えました（未設定は最後）");
   }
 
   function renderSchedule() {
@@ -835,17 +918,19 @@
               <div class="form-grid">
                 <div class="field full">
                   <label for="todoTitle">Todo名 *</label>
-                  <input id="todoTitle" maxlength="120" required value="${escapeHTML(todo.title)}" />
+                  <textarea id="todoTitle" maxlength="120" rows="2" required placeholder="改行できます">${escapeHTML(todo.title)}</textarea>
                 </div>
 
                 <div class="field">
                   <label for="todoDueDate">期限</label>
-                  <input id="todoDueDate" type="date" value="${escapeHTML(todo.dueDate)}" />
+                  <div class="date-with-reset"><input id="todoDueDate" type="date" value="${escapeHTML(todo.dueDate)}" />
+                    <button type="button" class="secondary-btn" data-clear-date="todoDueDate">未設定に戻す</button></div>
                 </div>
 
                 <div class="field">
                   <label for="todoExecutionDate">実行日</label>
-                  <input id="todoExecutionDate" type="date" value="${escapeHTML(todo.executionDate)}" />
+                  <div class="date-with-reset"><input id="todoExecutionDate" type="date" value="${escapeHTML(todo.executionDate)}" />
+                    <button type="button" class="secondary-btn" data-clear-date="todoExecutionDate">未設定に戻す</button></div>
                 </div>
 
                 <div class="field">
@@ -916,8 +1001,16 @@
       $("#subtaskRows").innerHTML = workingSubtasks.length ? workingSubtasks.map((s, i) => `
         <div class="subtask-row" data-sub-index="${i}">
           <input type="checkbox" data-sub-check="${i}" ${s.completed ? "checked" : ""} aria-label="サブTodo完了" />
-          <input type="text" data-sub-title="${i}" value="${escapeHTML(s.title)}" placeholder="サブTodo名" />
-          <button class="icon-btn" type="button" data-sub-remove="${i}" aria-label="削除">×</button>
+          <div class="subtask-fields">
+            <input type="text" data-sub-title="${i}" value="${escapeHTML(s.title)}" placeholder="サブTodo名" aria-label="サブTodo名" />
+            <label>実行日（任意）<span class="subtask-date-field"><input type="date" data-sub-date="${i}" value="${escapeHTML(s.executionDate || "")}" />
+              <button class="secondary-btn" type="button" data-sub-clear-date="${i}" aria-label="${i + 1}番目のサブTodo実行日を消去">消去</button></span></label>
+          </div>
+          <div class="subtask-controls">
+            <button class="secondary-btn" type="button" data-sub-up="${i}" ${i === 0 ? "disabled" : ""} aria-label="${i + 1}番目のサブTodoを上へ">↑</button>
+            <button class="secondary-btn" type="button" data-sub-down="${i}" ${i === workingSubtasks.length - 1 ? "disabled" : ""} aria-label="${i + 1}番目のサブTodoを下へ">↓</button>
+            <button class="icon-btn" type="button" data-sub-remove="${i}" aria-label="${i + 1}番目のサブTodoを削除">×</button>
+          </div>
         </div>
       `).join("") : `<div class="empty-note">サブTodoはありません</div>`;
 
@@ -927,6 +1020,23 @@
       $$("[data-sub-title]", $("#modalRoot")).forEach(el => el.oninput = () => {
         workingSubtasks[Number(el.dataset.subTitle)].title = el.value;
       });
+      $$("[data-sub-date]", $("#modalRoot")).forEach(el => el.onchange = () => {
+        workingSubtasks[Number(el.dataset.subDate)].executionDate = el.value;
+      });
+      $$("[data-sub-clear-date]", $("#modalRoot")).forEach(el => el.onclick = () => {
+        const index = Number(el.dataset.subClearDate);
+        workingSubtasks[index].executionDate = "";
+        $(`[data-sub-date="${index}"]`, $("#subtaskRows")).value = "";
+      });
+      for (const direction of ["up", "down"]) {
+        $$(`[data-sub-${direction}]`, $("#modalRoot")).forEach(el => el.onclick = () => {
+          const from = Number(el.dataset[`sub${direction[0].toUpperCase() + direction.slice(1)}`]);
+          const to = from + (direction === "up" ? -1 : 1);
+          if (to < 0 || to >= workingSubtasks.length) return;
+          [workingSubtasks[from], workingSubtasks[to]] = [workingSubtasks[to], workingSubtasks[from]];
+          renderSubtasks();
+        });
+      }
       $$("[data-sub-remove]", $("#modalRoot")).forEach(el => el.onclick = () => {
         workingSubtasks.splice(Number(el.dataset.subRemove), 1);
         renderSubtasks();
@@ -935,9 +1045,15 @@
     renderSubtasks();
 
     $("#addSubtaskBtn").onclick = () => {
-      workingSubtasks.push({ id: uid("sub"), title: "", completed: false });
+      workingSubtasks.push({ id: uid("sub"), title: "", completed: false, executionDate: "" });
       renderSubtasks();
     };
+
+    $$('[data-clear-date]', $("#todoForm")).forEach(button => button.onclick = () => {
+      const field = document.getElementById(button.dataset.clearDate);
+      field.value = "";
+      field.dispatchEvent(new Event("change", { bubbles: true }));
+    });
 
     bindModalClose();
 
@@ -966,10 +1082,13 @@
         urgency: $("#todoUrgency").value,
         weekKey: $("#todoWeek").value,
         subtasks: workingSubtasks
-          .map(s => ({ id: s.id || uid("sub"), title: (s.title || "").trim(), completed: Boolean(s.completed) }))
+          .map(s => ({ id: s.id || uid("sub"), title: (s.title || "").trim(), completed: Boolean(s.completed), executionDate: s.executionDate || "" }))
           .filter(s => s.title),
+        urgencyPromptKey: existing?.urgency === "high" && $("#todoUrgency").value === "low" ? "" : existing?.urgencyPromptKey || "",
         updatedAt: now
       };
+
+      askToMakeUrgent(data);
 
       if (existing) {
         const current = state.todos.find(t => t.id === existing.id);
@@ -1670,6 +1789,8 @@
           pointerId: e.pointerId,
           x: e.clientX,
           y: e.clientY,
+          startX: e.clientX,
+          startY: e.clientY,
           started: false,
           timer: null,
           ghost: null,
@@ -1701,9 +1822,12 @@
     drag.x = e.clientX;
     drag.y = e.clientY;
     if (!drag.started) {
-      const dx = Math.abs(e.clientX - drag.x);
-      const dy = Math.abs(e.clientY - drag.y);
-      if (dx + dy > 16) clearTimeout(drag.timer);
+      const dx = Math.abs(e.clientX - drag.startX);
+      const dy = Math.abs(e.clientY - drag.startY);
+      if (dx + dy > 16) {
+        if (e.pointerType === "mouse") startDrag(e);
+        else clearTimeout(drag.timer);
+      }
       return;
     }
     e.preventDefault();
@@ -1799,6 +1923,7 @@
     });
 
     $("#addMatrixTodoBtn").onclick = () => openTodoModal(null, { importance: "high", urgency: "high" });
+    $("#sortMatrixByDateBtn").onclick = sortMatrixByExecutionDate;
     $("#addWeekTodoBtn").onclick = () => openTodoModal(null, { weekKey: startOfWeek(todayISO()) });
     $("#addNextWeekTodoBtn").onclick = () => openTodoModal(null, { weekKey: addDays(startOfWeek(todayISO()), 7) });
     $("#addDayTodoBtn").onclick = () => openTodoModal(null, { executionDate: selectedDate });
@@ -1852,14 +1977,15 @@
     scheduleWeekBoundary();
     let lastSeenDay = todayISO();
     setInterval(() => {
-      if (lastSeenDay !== todayISO()) { lastSeenDay = todayISO(); carryWeeksForward(); renderSchedule(); }
+      if (lastSeenDay !== todayISO()) { lastSeenDay = todayISO(); carryWeeksForward(); renderSchedule(); if (!syncUser || syncReady) promptForUrgentTodos(); }
     }, 30 * 1000);
     document.addEventListener("visibilitychange", () => {
-      if (!document.hidden) { lastSeenDay = todayISO(); carryWeeksForward(); renderSchedule(); }
+      if (!document.hidden) { lastSeenDay = todayISO(); carryWeeksForward(); renderSchedule(); if (!syncUser || syncReady) promptForUrgentTodos(); }
     });
     checkYesterdayCarryover();
     registerPWA();
     startSync();
+    if (!window.SUSSU_FIREBASE_CONFIG?.apiKey) promptForUrgentTodos();
   }
 
   init();
