@@ -2,7 +2,7 @@
   "use strict";
 
   const STORAGE_KEY = "sussu-data-v1";
-  const VERSION = 9;
+  const VERSION = 10;
   // The same 16 choices are used for priority and category colors.
   const COLOR_PALETTE = [
     ["赤", "#d95c5c"], ["濃い赤", "#b94359"], ["オレンジ", "#d58a37"], ["黄", "#d4a72c"],
@@ -594,11 +594,7 @@
           <div class="todo-meta">${catBadge}${due}${exec}${sub}</div>
           ${subtaskList}
         </button>
-        <div class="matrix-order-controls">
-          <button type="button" data-move-up="${todo.id}" aria-label="${escapeHTML(todo.title)}を上へ">↑</button>
-          <button type="button" data-move-down="${todo.id}" aria-label="${escapeHTML(todo.title)}を下へ">↓</button>
-          <button class="drag-handle" type="button" aria-label="ドラッグして移動" data-drag="${todo.id}">⋮⋮</button>
-        </div>
+        <button class="drag-handle" type="button" aria-label="${escapeHTML(todo.title)}をドラッグして並び替え" data-drag="${todo.id}">⋮⋮</button>
       </article>
     `;
   }
@@ -616,26 +612,7 @@
         openTodoModal(btn.dataset.edit);
       });
     });
-    for (const direction of ["up", "down"]) {
-      $$(`[data-move-${direction}]`, $("#matrixPage")).forEach(btn => btn.onclick = () =>
-        moveMatrixTodo(btn.dataset[direction === "up" ? "moveUp" : "moveDown"], direction === "up" ? -1 : 1));
-    }
     initPointerDrag();
-  }
-
-  function moveMatrixTodo(id, delta) {
-    const todo = state.todos.find(t => t.id === id);
-    if (!todo) return;
-    const quadrant = activeTodos().filter(t => t.importance === todo.importance && t.urgency === todo.urgency)
-      .sort((a,b) => a.sortOrder - b.sortOrder || a.createdAt.localeCompare(b.createdAt));
-    const from = quadrant.findIndex(t => t.id === id);
-    const to = from + delta;
-    if (to < 0 || to >= quadrant.length) return;
-    [quadrant[from], quadrant[to]] = [quadrant[to], quadrant[from]];
-    const now = new Date().toISOString();
-    quadrant.forEach((item, i) => { item.sortOrder = (i + 1) * 100; item.updatedAt = now; });
-    saveState();
-    renderAll();
   }
 
   function sortMatrixByExecutionDate() {
@@ -997,6 +974,83 @@
     $("#modalRoot").innerHTML = html;
 
     let workingSubtasks = todo.subtasks.map(s => ({...s}));
+    let subtaskDrag = null;
+    function bindSubtaskDrag() {
+      $$('[data-sub-drag]', $("#subtaskRows")).forEach(handle => {
+        handle.onpointerdown = event => {
+          if (subtaskDrag || (event.button !== undefined && event.button !== 0)) return;
+          event.preventDefault();
+          const row = handle.closest(".subtask-row");
+          const container = $("#subtaskRows");
+          if (!row || workingSubtasks.length < 2) return;
+          const rect = row.getBoundingClientRect();
+          const ghost = row.cloneNode(true);
+          ghost.classList.add("subtask-ghost");
+          ghost.style.width = `${rect.width}px`;
+          ghost.style.left = `${rect.left}px`;
+          document.body.appendChild(ghost);
+          row.classList.add("dragging");
+          subtaskDrag = {
+            pointerId:event.pointerId, row, ghost, container,
+            from:Number(handle.dataset.subDrag), offsetY:event.clientY - rect.top,
+            dropIndex:null
+          };
+          try { handle.setPointerCapture(event.pointerId); } catch (_) { /* Pointer events still reach document. */ }
+          const move = e => {
+            if (!subtaskDrag || e.pointerId !== subtaskDrag.pointerId) return;
+            e.preventDefault();
+            ghost.style.top = `${e.clientY - subtaskDrag.offsetY}px`;
+            const modal = $("#modalRoot .modal");
+            const modalRect = modal.getBoundingClientRect();
+            if (e.clientY < modalRect.top + 55) modal.scrollTop -= 16;
+            if (e.clientY > modalRect.bottom - 55) modal.scrollTop += 16;
+            const bounds = container.getBoundingClientRect();
+            $$(".subtask-row", container).forEach(item => item.classList.remove("drop-before", "drop-after"));
+            if (e.clientX < bounds.left - 20 || e.clientX > bounds.right + 20 ||
+                e.clientY < modalRect.top || e.clientY > modalRect.bottom) {
+              subtaskDrag.dropIndex = null;
+              return;
+            }
+            const others = $$(".subtask-row", container).filter(item => item !== row);
+            const at = insertionIndex(others, e.clientY);
+            subtaskDrag.dropIndex = at;
+            if (others.length) (others[at] || others[at - 1]).classList.add(at < others.length ? "drop-before" : "drop-after");
+          };
+          const finish = e => {
+            if (!subtaskDrag || e.pointerId !== subtaskDrag.pointerId) return;
+            // A final pointer position can differ from the last move event.
+            move(e);
+            document.removeEventListener("pointermove", move);
+            document.removeEventListener("pointerup", finish);
+            document.removeEventListener("pointercancel", cancel);
+            const {from, dropIndex} = subtaskDrag;
+            ghost.remove();
+            row.classList.remove("dragging");
+            $$(".subtask-row", container).forEach(item => item.classList.remove("drop-before", "drop-after"));
+            subtaskDrag = null;
+            if (dropIndex !== null && dropIndex !== from) {
+              const [item] = workingSubtasks.splice(from, 1);
+              workingSubtasks.splice(dropIndex, 0, item);
+              renderSubtasks();
+            }
+          };
+          const cancel = e => {
+            if (!subtaskDrag || e.pointerId !== subtaskDrag.pointerId) return;
+            document.removeEventListener("pointermove", move);
+            document.removeEventListener("pointerup", finish);
+            document.removeEventListener("pointercancel", cancel);
+            ghost.remove();
+            row.classList.remove("dragging");
+            $$(".subtask-row", container).forEach(item => item.classList.remove("drop-before", "drop-after"));
+            subtaskDrag = null;
+          };
+          document.addEventListener("pointermove", move, {passive:false});
+          document.addEventListener("pointerup", finish);
+          document.addEventListener("pointercancel", cancel);
+          ghost.style.top = `${rect.top}px`;
+        };
+      });
+    }
     const renderSubtasks = () => {
       $("#subtaskRows").innerHTML = workingSubtasks.length ? workingSubtasks.map((s, i) => `
         <div class="subtask-row" data-sub-index="${i}">
@@ -1007,8 +1061,7 @@
               <button class="secondary-btn" type="button" data-sub-clear-date="${i}" aria-label="${i + 1}番目のサブTodo実行日を消去">消去</button></span></label>
           </div>
           <div class="subtask-controls">
-            <button class="secondary-btn" type="button" data-sub-up="${i}" ${i === 0 ? "disabled" : ""} aria-label="${i + 1}番目のサブTodoを上へ">↑</button>
-            <button class="secondary-btn" type="button" data-sub-down="${i}" ${i === workingSubtasks.length - 1 ? "disabled" : ""} aria-label="${i + 1}番目のサブTodoを下へ">↓</button>
+            <button class="subtask-drag-handle" type="button" data-sub-drag="${i}" aria-label="${i + 1}番目のサブTodoをドラッグして並び替え">⋮⋮</button>
             <button class="icon-btn" type="button" data-sub-remove="${i}" aria-label="${i + 1}番目のサブTodoを削除">×</button>
           </div>
         </div>
@@ -1028,15 +1081,7 @@
         workingSubtasks[index].executionDate = "";
         $(`[data-sub-date="${index}"]`, $("#subtaskRows")).value = "";
       });
-      for (const direction of ["up", "down"]) {
-        $$(`[data-sub-${direction}]`, $("#modalRoot")).forEach(el => el.onclick = () => {
-          const from = Number(el.dataset[`sub${direction[0].toUpperCase() + direction.slice(1)}`]);
-          const to = from + (direction === "up" ? -1 : 1);
-          if (to < 0 || to >= workingSubtasks.length) return;
-          [workingSubtasks[from], workingSubtasks[to]] = [workingSubtasks[to], workingSubtasks[from]];
-          renderSubtasks();
-        });
-      }
+      bindSubtaskDrag();
       $$("[data-sub-remove]", $("#modalRoot")).forEach(el => el.onclick = () => {
         workingSubtasks.splice(Number(el.dataset.subRemove), 1);
         renderSubtasks();
@@ -1774,12 +1819,21 @@
     $("#carryNoneBtn").onclick = closeModal;
   }
 
-  // Touch/Pointer compatible matrix drag using only local code.
+  function insertionIndex(elements, y) {
+    const index = elements.findIndex(item => {
+      const rect = item.getBoundingClientRect();
+      return y < rect.top + rect.height / 2;
+    });
+    return index < 0 ? elements.length : index;
+  }
+
+  // Drag by the handle so the rest of each card still scrolls normally on phones.
   let drag = null;
 
   function initPointerDrag() {
     $$("[data-drag]").forEach(handle => {
       handle.onpointerdown = e => {
+        if (drag || (e.button !== undefined && e.button !== 0)) return;
         e.preventDefault();
         const card = handle.closest(".todo-card");
         if (!card) return;
@@ -1791,13 +1845,11 @@
           y: e.clientY,
           startX: e.clientX,
           startY: e.clientY,
-          started: false,
-          timer: null,
           ghost: null,
           zone: null
         };
-        const delay = e.pointerType === "mouse" ? 0 : 140;
-        drag.timer = setTimeout(() => startDrag(e), delay);
+        try { handle.setPointerCapture(e.pointerId); } catch (_) { /* Pointer events still reach document. */ }
+        startDrag();
         document.addEventListener("pointermove", onDragMove, { passive: false });
         document.addEventListener("pointerup", endDrag, { passive: false });
         document.addEventListener("pointercancel", cancelDrag, { passive: false });
@@ -1805,15 +1857,15 @@
     });
   }
 
-  function startDrag(e) {
-    if (!drag || drag.started) return;
-    drag.started = true;
+  function startDrag() {
+    if (!drag || drag.ghost) return;
     drag.card.classList.add("dragging");
     drag.ghost = drag.card.cloneNode(true);
     drag.ghost.classList.add("drag-ghost");
     drag.ghost.classList.remove("dragging");
     document.body.appendChild(drag.ghost);
     positionGhost(drag.x, drag.y);
+    drag.zone = drag.card.closest(".matrix-dropzone");
     suppressClickUntil = Date.now() + 500;
   }
 
@@ -1821,23 +1873,20 @@
     if (!drag || e.pointerId !== drag.pointerId) return;
     drag.x = e.clientX;
     drag.y = e.clientY;
-    if (!drag.started) {
-      const dx = Math.abs(e.clientX - drag.startX);
-      const dy = Math.abs(e.clientY - drag.startY);
-      if (dx + dy > 16) {
-        if (e.pointerType === "mouse") startDrag(e);
-        else clearTimeout(drag.timer);
-      }
-      return;
-    }
     e.preventDefault();
     positionGhost(e.clientX, e.clientY);
     $$(".matrix-dropzone").forEach(z => z.classList.remove("drag-target"));
+    $$(".todo-card").forEach(card => card.classList.remove("drop-before", "drop-after"));
+    if (e.clientY < 45) window.scrollBy(0, -18);
+    if (e.clientY > window.innerHeight - 45) window.scrollBy(0, 18);
     const el = document.elementFromPoint(e.clientX, e.clientY);
     const zone = el && el.closest(".matrix-dropzone");
     if (zone) {
       zone.classList.add("drag-target");
       drag.zone = zone;
+      const otherCards = $$(".todo-card", zone).filter(card => card.dataset.id !== drag.id);
+      const index = insertionIndex(otherCards, e.clientY);
+      if (otherCards.length) (otherCards[index] || otherCards[index - 1]).classList.add(index < otherCards.length ? "drop-before" : "drop-after");
     } else {
       drag.zone = null;
     }
@@ -1850,17 +1899,18 @@
   }
 
   function endDrag(e) {
-    if (!drag || e.pointerId !== drag.pointerId) return cleanupDrag();
-    clearTimeout(drag.timer);
-    if (drag.started && drag.zone) {
-      performDrop(drag.id, drag.zone, e.clientY);
+    if (!drag || e.pointerId !== drag.pointerId) return;
+    const moved = Math.abs(e.clientX - drag.startX) + Math.abs(e.clientY - drag.startY) > 8;
+    if (moved) {
+      const el = document.elementFromPoint(e.clientX, e.clientY);
+      const zone = el && el.closest(".matrix-dropzone");
+      if (zone) performDrop(drag.id, zone, e.clientY);
     }
     cleanupDrag();
   }
 
-  function cancelDrag() {
-    if (!drag) return;
-    clearTimeout(drag.timer);
+  function cancelDrag(e) {
+    if (!drag || e.pointerId !== drag.pointerId) return;
     cleanupDrag();
   }
 
@@ -1869,6 +1919,7 @@
     document.removeEventListener("pointerup", endDrag);
     document.removeEventListener("pointercancel", cancelDrag);
     $$(".matrix-dropzone").forEach(z => z.classList.remove("drag-target"));
+    $$(".todo-card").forEach(card => card.classList.remove("drop-before", "drop-after"));
     if (drag) {
       if (drag.card) drag.card.classList.remove("dragging");
       if (drag.ghost) drag.ghost.remove();
@@ -1883,14 +1934,7 @@
     const newUrg = zone.dataset.urgency;
 
     const visibleCards = $$(".todo-card", zone).filter(c => c.dataset.id !== todoId);
-    let insertIndex = visibleCards.length;
-    for (let i = 0; i < visibleCards.length; i++) {
-      const rect = visibleCards[i].getBoundingClientRect();
-      if (y < rect.top + rect.height / 2) {
-        insertIndex = i;
-        break;
-      }
-    }
+    const insertIndex = insertionIndex(visibleCards, y);
 
     todo.importance = newImp;
     todo.urgency = newUrg;
