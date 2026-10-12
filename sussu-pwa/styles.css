@@ -266,7 +266,18 @@ main {
   font-weight: 750;
   line-height: 1.35;
   overflow-wrap: anywhere;
+  white-space: pre-line;
 }
+
+.calendar-event, .calendar-agenda-main strong, .completed-row strong,
+.goal-checklist span, .time-block-main .todo-title { white-space: pre-line; }
+
+.matrix-order-controls { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.matrix-order-controls button { width: 24px; min-height: 22px; border: 1px solid var(--line); border-radius: 5px; background: white; color: var(--accent); font-size: 14px; line-height: 1; padding: 0; cursor: pointer; }
+.matrix-order-controls .drag-handle { border: 0; background: transparent; }
+.matrix-sort-footer { display: grid; justify-items: start; gap: 5px; margin: 12px 0 4px 36px; }
+.matrix-sort-footer small { color: var(--muted); }
+.matrix-subtasks small { color: var(--muted); white-space: nowrap; font-size: 10px; }
 
 .todo-meta {
   margin-top: 4px;
@@ -704,10 +715,24 @@ main {
 
 .subtask-row {
   display: grid;
-  grid-template-columns: 28px minmax(0,1fr) 34px;
+  grid-template-columns: 28px minmax(0,1fr) auto;
   gap: 6px;
-  align-items: center;
+  align-items: start;
 }
+
+.subtask-fields { display: grid; gap: 4px; min-width: 0; }
+.subtask-fields label { display: grid; gap: 2px; font-size: 11px; color: var(--muted); }
+.subtask-fields input[type="date"] { width: 100%; min-width: 0; min-height: 36px; border: 1px solid var(--line); border-radius: 8px; background: white; padding: 4px; }
+.subtask-date-field { display: flex; gap: 3px; align-items: center; }
+.subtask-date-field input { flex: 1 1 auto; }
+.subtask-date-field button { font-size: 11px; padding: 5px; }
+.subtask-row input[type="checkbox"] { margin-top: 10px; }
+.subtask-controls { display: flex; align-items: center; gap: 2px; }
+.subtask-controls button { padding: 5px; min-width: 26px; min-height: 32px; }
+.subtask-controls button:disabled { opacity: .35; }
+.date-with-reset { display: flex; flex-wrap: wrap; gap: 6px; }
+.date-with-reset input { flex: 1 1 130px; min-width: 0; }
+.date-with-reset button { font-size: 12px; padding: 6px 8px; }
 
 .subtask-row input[type="text"] {
   width: 100%;
@@ -788,7 +813,7 @@ input[type="color"] {
 #matrixPage .matrix-cell-head { padding: 5px 7px; }
 #matrixPage .matrix-dropzone { min-height: 146px; padding: 4px; }
 #matrixPage .todo-card {
-  grid-template-columns: 20px minmax(0, 1fr) 18px;
+  grid-template-columns: 20px minmax(0, 1fr) 24px;
   align-items: center; gap: 3px; margin-bottom: 3px;
   padding: 4px 3px 4px 2px; border-left-width: 3px;
   border-radius: 7px; box-shadow: none;
@@ -796,9 +821,15 @@ input[type="color"] {
 #matrixPage .complete-btn { width: 17px; height: 17px; border-radius: 5px; }
 #matrixPage .todo-title { font-size: 12px; line-height: 1.2; }
 #matrixPage .todo-meta { margin-top: 2px; gap: 2px; }
+#matrixPage .matrix-subtasks { list-style: none; margin: 5px 0 0; padding: 0; display: grid; gap: 3px; }
+#matrixPage .matrix-subtasks li { display: grid; grid-template-columns: 12px minmax(0, 1fr); align-items: start; gap: 4px; font-size: 11px; line-height: 1.25; overflow-wrap: anywhere; text-align: left; }
+#matrixPage .matrix-subtask-mark { width: 11px; height: 11px; border: 1px solid #9aa6b6; border-radius: 3px; display: flex; align-items: center; justify-content: center; font-size: 9px; line-height: 1; margin-top: 1px; color: white; }
+#matrixPage .matrix-subtasks .is-complete { color: var(--muted); }
+#matrixPage .matrix-subtasks .is-complete .matrix-subtask-mark { background: #4b9a78; border-color: #4b9a78; }
+#matrixPage .matrix-subtasks .is-complete span:last-child { text-decoration: line-through; }
 #matrixPage .badge { font-size: 9px; padding: 1px 4px; line-height: 1.2; }
 #matrixPage .category-badge { border-left-width: 3px; }
-#matrixPage .drag-handle { font-size: 15px; min-height: 24px; }
+#matrixPage .drag-handle { font-size: 15px; min-height: 22px; }
 
 .goal-checklist {
   max-height: 180px;
@@ -810,11 +841,48 @@ input[type="color"] {
 
 .goal-checklist label {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   padding: 6px 2px;
   font-size: 13px;
+  writing-mode: horizontal-tb;
+  text-orientation: mixed;
 }
+.goal-checklist label span { display: block; min-width: 0; flex: 1; white-space: normal; overflow-wrap: anywhere; writing-mode: horizontal-tb; }
+.goal-checklist input[type="checkbox"] { flex: 0 0 auto; margin-top: 2px; }
+.goal-checklist input[type="checkbox"], .goal-step-list input[type="checkbox"], .goal-complete-label input[type="checkbox"], .goal-step-edit-row input[type="checkbox"] {
+  width: 18px; height: 18px; min-height: 18px; padding: 0; flex: 0 0 18px;
+}
+.goal-entry { border-bottom: 1px solid var(--line); padding: 12px 0; }
+.goal-entry:last-child { border-bottom: 0; }
+.goal-entry .goal-row { border: 0; grid-template-columns: minmax(0, 1fr) auto; padding: 0 0 8px; }
+.goal-complete-label { display: flex; align-items: flex-start; gap: 8px; min-width: 0; overflow-wrap: anywhere; }
+.goal-complete-label input { flex: 0 0 auto; margin-top: 3px; }
+.goal-progress { height: 8px; border-radius: 8px; background: #e5eaf2; overflow: hidden; }
+.goal-progress div { height: 100%; background: #4b9a78; }
+.goal-entry small { display: block; margin: 5px 0; color: var(--muted); }
+.goal-step-list label { display: flex; align-items: flex-start; gap: 8px; padding: 4px 0; overflow-wrap: anywhere; }
+.goal-step-list label.done span { color: var(--muted); text-decoration: line-through; }
+.goal-completed { margin-top: 14px; }
+.goal-completed summary { cursor: pointer; font-weight: 700; }
+.goal-step-editor { display: grid; gap: 6px; margin: 7px 0; }
+.goal-step-edit-row { display: grid; grid-template-columns: 22px minmax(0,1fr) 30px; gap: 5px; align-items: center; }
+.goal-step-edit-row input[type="text"] { min-width: 0; width: 100%; }
+.field-hint { color: var(--muted); font-size: 12px; margin: 4px 0; }
+.category-legend { display: flex; flex-wrap: wrap; gap: 5px; margin: 7px 0 0; }
+.category-key { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; padding: 3px 7px; border-radius: 14px; border: 1px solid var(--cat-color); background: color-mix(in srgb, var(--cat-color) 14%, white); }
+.category-key i, .category-badge i { width: 8px; height: 8px; display: inline-block; flex: 0 0 auto; border-radius: 50%; background: var(--cat-color); }
+#matrixPage .category-badge { display: inline-flex; align-items: center; gap: 3px; border: 1px solid var(--cat-color); background: color-mix(in srgb, var(--cat-color) 18%, white); color: #1d2939; font-weight: 700; }
+.sync-status { display: block; margin: 6px 0 10px; font-size: 12px; color: var(--muted); }
+.sync-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+.sync-actions button { flex: 1 1 130px; }
+.sync-auth-form { display: grid; gap: 8px; }
+.sync-auth-form input { width: 100%; min-height: 38px; }
+.sync-auth-form label { display: grid; gap: 3px; }
+.sync-auth-form .sync-actions button { min-width: 110px; }
+#syncBanner { background: #fff3d8; color: #6d4a08; padding: 8px 12px; text-align: center; font-size: 12px; }
+#syncBanner:empty { display: none; }
+.sync-setup { line-height: 1.5; }
 
 .toast {
   position: fixed;
@@ -860,7 +928,8 @@ input[type="color"] {
   .matrix-grid { grid-template-columns: 22px minmax(0,1fr); gap: 4px; }
   #matrixPage .matrix-cell { min-height: 170px; }
   #matrixPage .matrix-dropzone { padding: 3px; min-height: 140px; }
-  #matrixPage .todo-card { grid-template-columns: 17px minmax(0,1fr) 15px; padding: 3px 2px; gap: 2px; }
+  #matrixPage .todo-card { grid-template-columns: 17px minmax(0,1fr) 24px; padding: 3px 2px; gap: 2px; }
+  .subtask-controls { flex-direction: column; }
   #matrixPage .complete-btn { width: 15px; height: 15px; }
   .todo-title { font-size: 12px; }
   .todo-meta .badge { font-size: 9px; padding-inline: 5px; }
