@@ -2,7 +2,7 @@
   "use strict";
 
   const STORAGE_KEY = "sussu-data-v1";
-  const VERSION = 10;
+  const VERSION = 11;
   // The same 16 choices are used for priority and category colors.
   const COLOR_PALETTE = [
     ["赤", "#d95c5c"], ["濃い赤", "#b94359"], ["オレンジ", "#d58a37"], ["黄", "#d4a72c"],
@@ -48,6 +48,9 @@
   let syncQueue = { todos:{}, goals:{}, settings:null };
   let syncInFlight = new Set();
   let syncStatusText = "同期設定を確認中";
+  let syncRevision = 0;
+  let syncReceiveRevision = 0;
+  let refreshPromise = null;
   let lastSavedState = JSON.parse(JSON.stringify(state));
 
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -109,10 +112,12 @@
       weekKey: t.weekKey || "",
       subtasks: Array.isArray(t.subtasks) ? t.subtasks.map(s => ({
         id: s.id || uid("sub"), title: s.title || "", completed: Boolean(s.completed),
-        executionDate: s.executionDate || ""
+        executionDate: s.executionDate || "", executionTime: s.executionTime || "",
+        memo: s.memo || ""
       })) : [],
       urgencyPromptKey: t.urgencyPromptKey || "",
       completed: Boolean(t.completed),
+      hidden: Boolean(t.hidden),
       completedAt: t.completedAt || "",
       deleted: Boolean(t.deleted),
       purged: Boolean(t.purged),
@@ -135,6 +140,7 @@
 
   function saveState() {
     state.version = VERSION;
+    syncRevision++;
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
     catch (error) { showToast("この端末への保存に失敗しました。空き容量を確認してください"); console.error(error); }
     if (syncController && syncReady) captureLocalChanges(lastSavedState, state);
@@ -149,6 +155,7 @@
             else waiting[kind][id] = value;
           });
           localStorage.setItem(syncQueueKey(owner), JSON.stringify(waiting));
+          setSyncStatus("同期待ち（端末内には保存済み）");
         } catch (error) { console.warn("同期待ちデータを保存できません", error); }
       }
     }
@@ -162,7 +169,10 @@
   function setSyncStatus(message) {
     syncStatusText = message;
     const banner = $("#syncBanner");
-    if (banner) banner.textContent = syncUser && message !== "同期済み" ? message : "";
+    if (banner) {
+      banner.textContent = window.SUSSU_FIREBASE_CONFIG?.apiKey ? message : "";
+      banner.classList.toggle("is-synced", message.startsWith("同期済み"));
+    }
     const status = $("#syncStatus");
     if (status) status.textContent = message;
   }
@@ -177,6 +187,41 @@
     persistQueue();
     setSyncStatus("同期中（端末内には保存済み）");
     flushSyncQueue();
+  }
+  function confirmedSyncStatus() {
+    return `同期済み（サーバー確認 ${new Date().toLocaleTimeString("ja-JP", {hour:"2-digit", minute:"2-digit"})}）`;
+  }
+  function requestSyncRefresh() {
+    if (!syncController || !syncUser || refreshPromise) return refreshPromise;
+    if (!navigator.onLine) { setSyncStatus("オフライン：変更は端末内に保存されています"); return null; }
+    if (syncReady && (syncHasPending() || syncInFlight.size)) {
+      setSyncStatus("送信待ちの変更があります");
+      flushSyncQueue();
+      return null;
+    }
+    const owner = syncUser.uid;
+    const revision = syncRevision;
+    const received = syncReceiveRevision;
+    setSyncStatus("サーバーの最新データを確認中");
+    const currentRefresh = syncController.refresh().then(remote => {
+      if (syncUser?.uid !== owner) return;
+      if (revision !== syncRevision || received !== syncReceiveRevision ||
+          (syncReady && (syncHasPending() || syncInFlight.size))) return;
+      remoteChanged(remote, "refresh");
+    }).catch(error => {
+      if (syncUser?.uid !== owner) return;
+      console.warn("同期の受信確認に失敗", error);
+      setSyncStatus("同期を確認できません。通信を確認して再試行してください");
+    }).finally(() => {
+      if (refreshPromise !== currentRefresh) return;
+      refreshPromise = null;
+      if (syncUser?.uid === owner && (revision !== syncRevision || received !== syncReceiveRevision) &&
+          !syncHasPending() && !syncInFlight.size) {
+        requestSyncRefresh();
+      }
+    });
+    refreshPromise = currentRefresh;
+    return refreshPromise;
   }
   function captureLocalChanges(before, after, enqueue = queueSync) {
     for (const kind of ["todos", "goals"]) {
@@ -216,9 +261,10 @@
             delete syncQueue[kind][id];
           }
           persistQueue();
-          setSyncStatus(syncHasPending() ? "同期中（端末内には保存済み）" : "同期済み");
           syncInFlight.delete(key);
+          setSyncStatus(syncHasPending() || syncInFlight.size ? "同期中（端末内には保存済み）" : "送信済み・受信確認中");
           flushSyncQueue();
+          if (!syncHasPending() && !syncInFlight.size) requestSyncRefresh();
         }).catch(error => {
           if (syncUser?.uid !== targetUid) return;
           syncInFlight.delete(key);
@@ -251,8 +297,9 @@
     carryWeeksForward();
     promptForUrgentTodos();
   }
-  function remoteChanged(remote) {
+  function remoteChanged(remote, source = "listener") {
     if (!syncUser) return;
+    if (source === "listener") syncReceiveRevision++;
     if (!syncReady) {
       const ownerKey = "sussu-sync-owner-v7";
       let oldOwner = localStorage.getItem(ownerKey);
@@ -280,7 +327,7 @@
       syncReady = true;
     }
     applyRemoteData(remote);
-    setSyncStatus(syncHasPending() ? "同期中（端末内には保存済み）" : "同期済み");
+    setSyncStatus(syncHasPending() || syncInFlight.size ? "同期中（端末内には保存済み）" : confirmedSyncStatus());
     flushSyncQueue();
   }
   function startSync() {
@@ -294,6 +341,7 @@
       auth(user) {
         syncUser = user;
         syncReady = false;
+        refreshPromise = null;
         syncInFlight = new Set();
         syncQueue = {todos:{}, goals:{}, settings:null};
         if (user) {
@@ -313,7 +361,11 @@
     })).then(client => {
       syncController = client;
       renderSyncSettings();
-      window.addEventListener("online", flushSyncQueue);
+      window.addEventListener("online", () => {
+        flushSyncQueue();
+        requestSyncRefresh();
+      });
+      window.addEventListener("offline", () => setSyncStatus("オフライン：変更は端末内に保存されています"));
     }).catch(error => {
       console.warn("Firebase を読み込めません", error);
       setSyncStatus("同期機能を読み込めません。接続を確認してください");
@@ -429,7 +481,7 @@
   }
 
   function activeTodos() {
-    return state.todos.filter(t => !t.deleted && !t.completed && !t.purged);
+    return state.todos.filter(t => !t.hidden && !t.deleted && !t.completed && !t.purged);
   }
 
   function escapeHTML(str = "") {
@@ -578,12 +630,12 @@
     const catBadge = cat
       ? `<span class="badge category-badge" style="--cat-color:${safeColor(cat.color)}"><i aria-hidden="true"></i>${escapeHTML(cat.name)}</span>`
       : "";
-    const subDone = todo.subtasks.filter(s => s.completed).length;
-    const sub = todo.subtasks.length ? `<span class="badge">${subDone}/${todo.subtasks.length}</span>` : "";
-    const subtaskList = todo.subtasks.length ? `<ul class="matrix-subtasks" aria-label="サブTodo">
-      ${todo.subtasks.map(s => `<li class="${s.completed ? "is-complete" : ""}">
-        <span class="matrix-subtask-mark" aria-hidden="true">${s.completed ? "✓" : ""}</span>
-        <span>${escapeHTML(s.title)}${s.executionDate ? ` <small>実行 ${escapeHTML(formatMD(s.executionDate))}</small>` : ""}</span>
+    const remainingSubtasks = todo.subtasks.filter(s => !s.completed);
+    const sub = todo.subtasks.length ? `<span class="badge">${remainingSubtasks.length}/${todo.subtasks.length} 未完了</span>` : "";
+    const subtaskList = remainingSubtasks.length ? `<ul class="matrix-subtasks" aria-label="未完了のサブTodo">
+      ${remainingSubtasks.map(s => `<li>
+        <span class="matrix-subtask-mark" aria-hidden="true"></span>
+        <span>${escapeHTML(s.title)}${s.executionDate || s.executionTime ? ` <small>実行 ${s.executionDate ? escapeHTML(formatMD(s.executionDate)) : ""}${s.executionTime ? ` ${escapeHTML(s.executionTime)}` : ""}</small>` : ""}</span>
       </li>`).join("")}
     </ul>` : "";
     return `
@@ -803,6 +855,7 @@
     if (!todo) return;
     const before = JSON.parse(JSON.stringify(todo));
     todo.completed = true;
+    todo.hidden = false;
     todo.completedAt = new Date().toISOString();
     todo.updatedAt = todo.completedAt;
     saveState();
@@ -838,11 +891,49 @@
     const todo = state.todos.find(t => t.id === id);
     if (!todo) return;
     todo.completed = false;
+    todo.hidden = false;
     todo.completedAt = "";
     todo.updatedAt = new Date().toISOString();
     saveState();
     openCompletedModal();
     renderAll();
+  }
+
+  function openHiddenModal() {
+    const hidden = state.todos.filter(t => t.hidden && !t.completed && !t.deleted && !t.purged)
+      .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
+    $("#modalRoot").innerHTML = `
+      <div class="modal-backdrop" data-close-backdrop>
+        <div class="modal" role="dialog" aria-modal="true" aria-label="非表示一覧">
+          <div class="modal-head"><h2>非表示一覧</h2><button class="icon-btn" type="button" data-close-modal>×</button></div>
+          <div class="modal-body">
+            ${hidden.length ? hidden.map(t => `<div class="hidden-row">
+              <strong>${escapeHTML(t.title)}</strong>
+              <div class="hidden-actions">
+                <button class="secondary-btn" type="button" data-unhide="${escapeHTML(t.id)}">Todoに戻す</button>
+                <button class="secondary-btn" type="button" data-hidden-complete="${escapeHTML(t.id)}">完了へ移動</button>
+              </div>
+            </div>`).join("") : '<div class="empty-note">非表示のTodoはありません</div>'}
+          </div>
+        </div>
+      </div>`;
+    bindModalClose();
+    $$("[data-unhide]").forEach(btn => btn.onclick = () => {
+      const todo = state.todos.find(t => t.id === btn.dataset.unhide);
+      if (!todo) return;
+      todo.hidden = false;
+      todo.updatedAt = new Date().toISOString();
+      saveState(); renderAll(); openHiddenModal();
+    });
+    $$("[data-hidden-complete]").forEach(btn => btn.onclick = () => {
+      const todo = state.todos.find(t => t.id === btn.dataset.hiddenComplete);
+      if (!todo) return;
+      todo.hidden = false;
+      todo.completed = true;
+      todo.completedAt = new Date().toISOString();
+      todo.updatedAt = todo.completedAt;
+      saveState(); renderAll(); openHiddenModal();
+    });
   }
 
   function purgeCompleted() {
@@ -856,6 +947,16 @@
     saveState();
     renderAll();
     openCompletedModal();
+  }
+
+  function autoGrowTextarea(field) {
+    if (!field) return;
+    const resize = () => {
+      field.style.height = "auto";
+      field.style.height = `${Math.max(field.scrollHeight + 2, 76)}px`;
+    };
+    field.addEventListener("input", resize);
+    resize();
   }
 
   function openTodoModal(id = null, preset = {}) {
@@ -874,6 +975,7 @@
       urgency: preset.urgency || "high",
       weekKey: preset.weekKey || "",
       subtasks: [],
+      hidden: false,
       sortOrder: nextSortOrder(preset.importance || "high", preset.urgency || "high")
     };
 
@@ -943,7 +1045,7 @@
 
                 <div class="field full">
                   <label for="todoDetails">詳細</label>
-                  <textarea id="todoDetails" maxlength="3000">${escapeHTML(todo.details)}</textarea>
+                  <textarea id="todoDetails" class="auto-grow" maxlength="3000" rows="3">${escapeHTML(todo.details)}</textarea>
                 </div>
 
                 <div class="field full">
@@ -964,6 +1066,7 @@
 
               <div class="modal-actions">
                 <button class="primary-btn" type="submit">保存</button>
+                ${existing ? `<button id="hideTodoBtn" class="secondary-btn" type="submit">非表示</button>` : ""}
                 ${existing ? `<button id="deleteTodoBtn" class="danger-btn" type="button">削除</button>` : ""}
               </div>
             </form>
@@ -974,6 +1077,7 @@
     $("#modalRoot").innerHTML = html;
 
     let workingSubtasks = todo.subtasks.map(s => ({...s}));
+    autoGrowTextarea($("#todoDetails"));
     let subtaskDrag = null;
     function bindSubtaskDrag() {
       $$('[data-sub-drag]', $("#subtaskRows")).forEach(handle => {
@@ -1059,6 +1163,9 @@
             <input type="text" data-sub-title="${i}" value="${escapeHTML(s.title)}" placeholder="サブTodo名" aria-label="サブTodo名" />
             <label>実行日（任意）<span class="subtask-date-field"><input type="date" data-sub-date="${i}" value="${escapeHTML(s.executionDate || "")}" />
               <button class="secondary-btn" type="button" data-sub-clear-date="${i}" aria-label="${i + 1}番目のサブTodo実行日を消去">消去</button></span></label>
+            <label>実行時刻（任意）<span class="subtask-date-field"><input type="time" data-sub-time="${i}" value="${escapeHTML(s.executionTime || "")}" />
+              <button class="secondary-btn" type="button" data-sub-clear-time="${i}" aria-label="${i + 1}番目のサブTodo実行時刻を消去">消去</button></span></label>
+            <label>メモ（任意）<textarea class="auto-grow subtask-memo" data-sub-memo="${i}" rows="2" maxlength="3000" placeholder="メモを入力">${escapeHTML(s.memo || "")}</textarea></label>
           </div>
           <div class="subtask-controls">
             <button class="subtask-drag-handle" type="button" data-sub-drag="${i}" aria-label="${i + 1}番目のサブTodoをドラッグして並び替え">⋮⋮</button>
@@ -1076,10 +1183,22 @@
       $$("[data-sub-date]", $("#modalRoot")).forEach(el => el.onchange = () => {
         workingSubtasks[Number(el.dataset.subDate)].executionDate = el.value;
       });
+      $$("[data-sub-time]", $("#modalRoot")).forEach(el => el.onchange = () => {
+        workingSubtasks[Number(el.dataset.subTime)].executionTime = el.value;
+      });
+      $$("[data-sub-memo]", $("#modalRoot")).forEach(el => {
+        autoGrowTextarea(el);
+        el.oninput = () => { workingSubtasks[Number(el.dataset.subMemo)].memo = el.value; };
+      });
       $$("[data-sub-clear-date]", $("#modalRoot")).forEach(el => el.onclick = () => {
         const index = Number(el.dataset.subClearDate);
         workingSubtasks[index].executionDate = "";
         $(`[data-sub-date="${index}"]`, $("#subtaskRows")).value = "";
+      });
+      $$("[data-sub-clear-time]", $("#modalRoot")).forEach(el => el.onclick = () => {
+        const index = Number(el.dataset.subClearTime);
+        workingSubtasks[index].executionTime = "";
+        $(`[data-sub-time="${index}"]`, $("#subtaskRows")).value = "";
       });
       bindSubtaskDrag();
       $$("[data-sub-remove]", $("#modalRoot")).forEach(el => el.onclick = () => {
@@ -1090,7 +1209,7 @@
     renderSubtasks();
 
     $("#addSubtaskBtn").onclick = () => {
-      workingSubtasks.push({ id: uid("sub"), title: "", completed: false, executionDate: "" });
+      workingSubtasks.push({ id: uid("sub"), title: "", completed: false, executionDate: "", executionTime: "", memo: "" });
       renderSubtasks();
     };
 
@@ -1127,13 +1246,14 @@
         urgency: $("#todoUrgency").value,
         weekKey: $("#todoWeek").value,
         subtasks: workingSubtasks
-          .map(s => ({ id: s.id || uid("sub"), title: (s.title || "").trim(), completed: Boolean(s.completed), executionDate: s.executionDate || "" }))
+          .map(s => ({ id: s.id || uid("sub"), title: (s.title || "").trim(), completed: Boolean(s.completed), executionDate: s.executionDate || "", executionTime: s.executionTime || "", memo: s.memo || "" }))
           .filter(s => s.title),
+        hidden: e.submitter?.id === "hideTodoBtn" ? true : Boolean(existing?.hidden),
         urgencyPromptKey: existing?.urgency === "high" && $("#todoUrgency").value === "low" ? "" : existing?.urgencyPromptKey || "",
         updatedAt: now
       };
 
-      askToMakeUrgent(data);
+      if (!data.hidden) askToMakeUrgent(data);
 
       if (existing) {
         const current = state.todos.find(t => t.id === existing.id);
@@ -1372,7 +1492,7 @@
     host.innerHTML = `<p class="sync-status" id="syncStatus">${escapeHTML(syncStatusText)}</p>` +
       (!configured ? `<p class="sync-setup">Firebase の設定がまだ入っていません。付属の「同期設定の手順」を参照してください。設定するまでは、この端末に保存して使えます。</p>` :
       syncUser ? `<p>ログイン中：<strong>${escapeHTML(syncUser.email || "ユーザー")}</strong></p>
-        <div class="sync-actions"><button class="secondary-btn" type="button" id="syncRetryBtn">同期を再試行</button>
+        <div class="sync-actions"><button class="secondary-btn" type="button" id="syncRetryBtn">最新データを確認・同期</button>
         <button class="secondary-btn" type="button" id="syncSignOutBtn">ログアウト</button></div>` :
       `<form id="syncAuthForm" class="sync-auth-form">
         <label>メールアドレス<input id="syncEmail" type="email" autocomplete="email" required /></label>
@@ -1382,7 +1502,7 @@
       </form>`);
     if (!configured || !syncController) return;
     if (syncUser) {
-      $("#syncRetryBtn").onclick = flushSyncQueue;
+      $("#syncRetryBtn").onclick = requestSyncRefresh;
       $("#syncSignOutBtn").onclick = async () => {
         if (syncHasPending() && !confirm("未同期の変更があります。ログアウトすると、この端末に保管されます。続行しますか？")) return;
         await syncController.signOut();
@@ -2003,6 +2123,7 @@
       renderSchedule();
     };
 
+    $("#hiddenBtn").onclick = openHiddenModal;
     $("#completedBtn").onclick = openCompletedModal;
     $("#settingsBtn").onclick = openSettingsModal;
     $("#yearGoalsBtn").onclick = () => openGoalsModal("year");
@@ -2024,8 +2145,13 @@
       if (lastSeenDay !== todayISO()) { lastSeenDay = todayISO(); carryWeeksForward(); renderSchedule(); if (!syncUser || syncReady) promptForUrgentTodos(); }
     }, 30 * 1000);
     document.addEventListener("visibilitychange", () => {
-      if (!document.hidden) { lastSeenDay = todayISO(); carryWeeksForward(); renderSchedule(); if (!syncUser || syncReady) promptForUrgentTodos(); }
+      if (!document.hidden) {
+        lastSeenDay = todayISO(); carryWeeksForward(); renderSchedule();
+        if (!syncUser || syncReady) promptForUrgentTodos();
+        requestSyncRefresh();
+      }
     });
+    window.addEventListener("focus", requestSyncRefresh);
     checkYesterdayCarryover();
     registerPWA();
     startSync();

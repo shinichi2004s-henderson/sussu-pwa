@@ -37,16 +37,16 @@ export async function createSyncApp(config, handlers) {
     };
     for (const kind of ["todos", "goals"]) {
       const ref = dbSdk.collection(db, "users", user.uid, kind);
-      unsubscribers.push(dbSdk.onSnapshot(ref, snapshot => {
+      unsubscribers.push(dbSdk.onSnapshot(ref, {includeMetadataChanges:true}, snapshot => {
         data[kind] = snapshot.docs.map(doc => ({...doc.data(), id:doc.id}));
-        data.ready[kind] = !snapshot.metadata.fromCache;
+        data.ready[kind] = !snapshot.metadata.fromCache && !snapshot.metadata.hasPendingWrites;
         notify();
       }, handlers.error));
     }
     const settingsRef = dbSdk.doc(db, "users", user.uid, "meta", "settings");
-    unsubscribers.push(dbSdk.onSnapshot(settingsRef, snapshot => {
+    unsubscribers.push(dbSdk.onSnapshot(settingsRef, {includeMetadataChanges:true}, snapshot => {
       data.settings = {exists:snapshot.exists(), value:snapshot.exists() ? snapshot.data().settings : null};
-      data.ready.settings = !snapshot.metadata.fromCache;
+      data.ready.settings = !snapshot.metadata.fromCache && !snapshot.metadata.hasPendingWrites;
       notify();
     }, handlers.error));
   }, handlers.error);
@@ -56,6 +56,23 @@ export async function createSyncApp(config, handlers) {
     signUp(email, password) { return authSdk.createUserWithEmailAndPassword(auth, email, password); },
     signOut() { return authSdk.signOut(auth); },
     getUser() { return currentUser; },
+    async refresh() {
+      const user = currentUser;
+      const session = epoch;
+      if (!user) throw new Error("ログインしてください");
+      const [todos, goals, settings] = await Promise.all([
+        dbSdk.getDocsFromServer(dbSdk.collection(db, "users", user.uid, "todos")),
+        dbSdk.getDocsFromServer(dbSdk.collection(db, "users", user.uid, "goals")),
+        dbSdk.getDocFromServer(dbSdk.doc(db, "users", user.uid, "meta", "settings"))
+      ]);
+      if (session !== epoch || !currentUser || currentUser.uid !== user.uid) throw new Error("ログイン状態が変わりました");
+      return {
+        todos:todos.docs.map(doc => ({...doc.data(), id:doc.id})),
+        goals:goals.docs.map(doc => ({...doc.data(), id:doc.id})),
+        settings:settings.exists() ? settings.data().settings : null,
+        hasSettings:settings.exists()
+      };
+    },
     write(kind, id, value) {
       if (!currentUser) return Promise.reject(new Error("ログインしてください"));
       const path = kind === "settings"

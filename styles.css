@@ -77,6 +77,8 @@ h1 {
   box-shadow: 0 3px 10px rgba(20, 30, 50, 0.04);
 }
 
+#hiddenBtn { width: auto; min-width: 56px; padding: 0 7px; font-size: 12px; font-weight: 700; }
+
 main {
   max-width: 900px;
   margin: 0 auto;
@@ -680,6 +682,8 @@ main {
   resize: vertical;
 }
 
+.field textarea.auto-grow { overflow: hidden; resize: none; }
+
 .check-line {
   display: flex;
   align-items: center;
@@ -720,6 +724,8 @@ main {
 .subtask-fields { display: grid; gap: 4px; min-width: 0; }
 .subtask-fields label { display: grid; gap: 2px; font-size: 11px; color: var(--muted); }
 .subtask-fields input[type="date"] { width: 100%; min-width: 0; min-height: 36px; border: 1px solid var(--line); border-radius: 8px; background: white; padding: 4px; }
+.subtask-fields input[type="time"] { width: 100%; min-width: 0; min-height: 36px; border: 1px solid var(--line); border-radius: 8px; background: white; padding: 4px; }
+.subtask-fields .subtask-memo { min-height: 76px; font-size: 13px; line-height: 1.5; overflow: hidden; resize: none; }
 .subtask-date-field { display: flex; gap: 3px; align-items: center; }
 .subtask-date-field input { flex: 1 1 auto; }
 .subtask-date-field button { font-size: 11px; padding: 5px; }
@@ -733,6 +739,9 @@ main {
 .drop-after { box-shadow: inset 0 -3px 0 var(--accent); }
 #matrixPage .todo-card.drop-before { box-shadow: inset 0 3px 0 var(--accent); }
 #matrixPage .todo-card.drop-after { box-shadow: inset 0 -3px 0 var(--accent); }
+.hidden-row { display: grid; gap: 9px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.hidden-row strong { white-space: pre-line; overflow-wrap: anywhere; }
+.hidden-actions { display: flex; flex-wrap: wrap; gap: 7px; }
 .date-with-reset { display: flex; flex-wrap: wrap; gap: 6px; }
 .date-with-reset input { flex: 1 1 130px; min-width: 0; }
 .date-with-reset button { font-size: 12px; padding: 6px 8px; }
@@ -884,6 +893,7 @@ input[type="color"] {
 .sync-auth-form label { display: grid; gap: 3px; }
 .sync-auth-form .sync-actions button { min-width: 110px; }
 #syncBanner { background: #fff3d8; color: #6d4a08; padding: 8px 12px; text-align: center; font-size: 12px; }
+#syncBanner.is-synced { background: #e8f6ed; color: #246943; }
 #syncBanner:empty { display: none; }
 .sync-setup { line-height: 1.5; }
 
